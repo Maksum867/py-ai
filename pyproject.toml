@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "py-ai"
+version = "0.1.0"
+description = "A command-line utility to pack Python codebases into a single text file for AI context, with clipboard support."
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Maksym Khlystun"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "pyperclip>=1.8.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/Maksum867/py-ai"
+
+[project.scripts]
+pyai = "py_ai.cli:main"
+py-ai = "py_ai.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/py_ai"]
