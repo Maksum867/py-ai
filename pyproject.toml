@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "py-ai"
+name = "py-for-ai"
 version = "0.1.0"
 description = "A command-line utility to pack Python codebases into a single text file for AI context, with clipboard support."
 readme = "README.md"
