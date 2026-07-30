@@ -3,7 +3,7 @@
 # py-ai 🚀
 
 [![PyPI version](https://img.shields.io/pypi/v/py-ai-pack.svg)](https://pypi.org/project/py-ai-pack/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/Maksum867/py-ai/blob/main/LICENSE)
 [![Python Support](https://img.shields.io/pypi/pyversions/py-ai-pack.svg)](https://pypi.org/project/py-ai-pack/)
 
 `py-ai` is a lightweight, zero-configuration command-line interface (CLI) tool designed for developers. It recursively scans your local Python codebase, filters out unnecessary files, and compiles your entire project—complete with a beautiful ASCII directory tree—into a single, organized text file while automatically copying it to your clipboard. 

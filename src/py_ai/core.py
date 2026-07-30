@@ -182,9 +182,9 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
 
     for file_path in files_to_pack:
         try:
-            rel_path = file_path.relative_to(root_path)
+            rel_path = file_path.relative_to(root_path).as_posix()
         except ValueError:
-            rel_path = file_path
+            rel_path = file_path.as_posix() if hasattr(file_path, "as_posix") else str(file_path)
 
         try:
             # Read files using UTF-8 encoding
