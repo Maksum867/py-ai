@@ -1,12 +1,29 @@
 """
 core.py module
 ==============
-Contains the core business logic for the py-ai utility:
-- File and directory ignore checks (should_ignore).
-- Project directory tree generation in ASCII format.
+Core orchestration logic for the py-ai utility:
+- Project directory tree generation in ASCII format (build_tree_lines).
 - Gathering allowed file contents and writing them to the final context file.
 - Copying the generated output to the system clipboard.
+
+Design notes
+------------
+- Traversal (walker and tree builder) is ITERATIVE (explicit stack), so
+  extremely deep projects do not hit Python's recursion limit. Files are
+  collected in the same deterministic order as the classic recursive DFS:
+  for every directory - subdirectories (with their subtrees) first, then
+  files, all sorted case-insensitively.
+- Symlinks resolving outside of the project root are never followed or
+  packed (see filters.py); cycles/duplicates are traversed once.
+- Backwards compatibility: the public names 'should_ignore',
+  'IGNORED_NAMES', 'IGNORED_EXTENSIONS', 'ALLOWED_HIDDEN_FILES',
+  'read_text_content', 'build_tree_lines' and 'pack_project' remain
+  available from 'py_ai.core'.
 """
+
+# PEP 563: postpone evaluation of annotations. Keeps `str | Path` (PEP 604)
+# and builtin-generic annotations importable on Python 3.8 and 3.9.
+from __future__ import annotations
 
 import os
 import sys
@@ -14,171 +31,302 @@ from pathlib import Path
 from datetime import datetime
 import pyperclip
 
-# Standard lists of exclusions for ignore checks
-IGNORED_NAMES = {
-    # Version control and system folders
-    '.git', '.github', '.gitlab', '.svn', '.hg', 'node_modules',
-    # Python runtime and caches
-    '__pycache__', '.venv', 'venv', 'env', '.env', '.pytest_cache',
-    '.mypy_cache', '.ruff_cache', '.tox', '.nox', '.egg-info', 'build', 'dist',
-    # IDE and editor settings
-    '.idea', '.vscode', '.settings',
-    # OS system files
-    '.DS_Store', 'Thumbs.db', 'desktop.ini'
-}
+from py_ai.filters import (
+    ALLOWED_HIDDEN_FILES,
+    IGNORED_EXTENSIONS,
+    IGNORED_NAMES,
+    _is_outside_root,
+    load_ignore_matcher,
+    make_filter,
+    should_ignore,
+)
+from py_ai.formatting import assemble_output, available_formats, format_file_block
+from py_ai.readers import read_text_content
+from py_ai.tokens import count_lines, count_tokens
 
-IGNORED_EXTENSIONS = {
-    # Compiled Python and binary artifacts
-    '.pyc', '.pyo', '.pyd', '.class', '.o', '.obj', '.dll', '.so', '.dylib',
-    # Archives/Compressed files
-    '.zip', '.tar', '.gz', '.bz2', '.xz', '.rar', '.7z', '.tgz',
-    # Images and multimedia
-    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff', '.svg',
-    '.mp3', '.wav', '.ogg', '.flac', '.mp4', '.mkv', '.avi', '.mov', '.webm',
-    # Fonts
-    '.woff', '.woff2', '.ttf', '.eot', '.otf',
-    # Databases and binary documents
-    '.db', '.sqlite', '.sqlite3', '.pdf', '.epub',
-    # Office documents
-    '.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt'
-}
+# Internal sentinel used in the tree stack for directory symlinks; the final
+# human-readable note is chosen when the entry is popped and rendered.
+_DIR_SYMLINK_MARKER = "__pyai_dir_symlink__"
+
+__all__ = [
+    "ALLOWED_HIDDEN_FILES",
+    "IGNORED_EXTENSIONS",
+    "IGNORED_NAMES",
+    "should_ignore",
+    "read_text_content",
+    "build_tree_lines",
+    "pack_project",
+]
 
 
-def should_ignore(path: Path, root_dir: Path) -> bool:
+def _is_same_path(first: Path, second: Path) -> bool:
     """
-    Checks if a file or directory should be ignored based on standard exclusions.
-
-    :param path: Path to the file or folder to verify.
-    :param root_dir: Root directory of the project.
-    :return: True if the path should be ignored, False otherwise.
+    Safely compares two paths by their resolved location. Never raises,
+    even for broken symlinks or non-existent paths.
     """
     try:
-        # Resolve to absolute paths to avoid issues with relative path operations
-        abs_root = root_dir.resolve()
-        abs_path = path.resolve()
-        # Calculate path relative to the root directory
-        rel_path = abs_path.relative_to(abs_root)
-    except ValueError:
-        # Fallback if the path is not under the root directory
-        rel_path = path
-
-    # Check each part of the relative path.
-    # If any parent folder is in the ignored list, ignore the entire subtree.
-    for part in rel_path.parts:
-        if part in IGNORED_NAMES or part.lower() in IGNORED_NAMES:
-            return True
-        
-        # Ignore any hidden folders/files (starting with a dot),
-        # except allowed configuration files such as .gitignore or .env.example
-        if part.startswith('.') and part not in ('.gitignore', '.env.example', '.env.template', '.pylintrc'):
-            return True
-
-    # Additional file-level checks for extensions and file names
-    if path.is_file():
-        if path.suffix.lower() in IGNORED_EXTENSIONS:
-            return True
-        if path.name.lower() in IGNORED_NAMES:
-            return True
-
-    return False
+        return first.resolve() == second.resolve()
+    except OSError:
+        return os.path.abspath(first) == os.path.abspath(second)
 
 
-def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool = True, is_root: bool = False) -> list[str]:
+def _link_suffix(path: Path) -> str:
+    """Returns a ' -> target' suffix for symlinks, or an empty string."""
+    if path.is_symlink():
+        try:
+            return f" -> {os.readlink(path)}"
+        except OSError:
+            return " -> <unreadable link>"
+    return ""
+
+
+def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool = True,
+                     is_root: bool = False, exclude_path: Path | None = None,
+                     skipped_files: dict[Path, str] | None = None,
+                     ignore_predicate=None) -> list[str]:
     """
-    Recursively generates the ASCII project tree, skipping ignored files and folders.
+    Generates the ASCII project tree, skipping ignored files and folders.
 
-    :param path: Current path (file or folder).
-    :param root_dir: Root directory of the project (for should_ignore checks).
-    :param prefix: Prefix for the current line (indentation and connection symbols).
+    The traversal is ITERATIVE (explicit stack), so arbitrarily deep projects
+    do not raise RecursionError. Symlink cycles/duplicates are visited once
+    and marked instead of exploding the tree.
+
+    :param path: Path of the root folder to render.
+    :param root_dir: Root directory of the project (for filtering checks).
+    :param prefix: Prefix for the current line (indentation/connection symbols).
     :param is_last: Whether the current item is the last one in its parent directory.
     :param is_root: Whether the current item is the root folder of the project.
+    :param exclude_path: Optional path (e.g. the output file) that must not
+                         appear in the tree.
+    :param skipped_files: Optional mapping of {file path: reason}. Such files
+                          are shown in the tree with a "[skipped: ...]" note so
+                          the tree stays consistent with the FILES CONTENT section.
+    :param ignore_predicate: Optional callable(Path) -> bool (built-ins only
+                             when omitted; use make_filter() to extend).
     :return: List of strings forming the ASCII tree.
     """
-    lines = []
-    
-    # Root directory displays with its name and a trailing slash
-    if is_root:
-        lines.append(f"{path.name}/")
-    else:
-        connector = "└── " if is_last else "├── "
-        display_name = path.name + ("/" if path.is_dir() else "")
-        lines.append(f"{prefix}{connector}{display_name}")
+    if ignore_predicate is None:
+        ignore_predicate = make_filter(root_dir)
 
-    if path.is_dir():
+    lines: list[str] = []
+    visited_dirs: set[tuple[int, int]] = set()
+
+    exclude_resolved = None
+    if exclude_path is not None:
         try:
-            # List directory items, sort them: directories first, then files (case-insensitive)
-            # Filter out any ignored items immediately
-            items = sorted(
-                [item for item in path.iterdir() if not should_ignore(item, root_dir)],
-                key=lambda x: (not x.is_dir(), x.name.lower())
-            )
-        except OSError as e:
-            # Handle permission errors or system issues gracefully in the tree
-            connector = "└── " if is_last else "├── "
-            lines.append(f"{prefix}{connector}[Permission denied/Error accessing directory: {e}]")
-            return lines
+            exclude_resolved = exclude_path.resolve()
+        except OSError:
+            exclude_resolved = Path(os.path.abspath(exclude_path))
 
-        for i, item in enumerate(items):
-            item_is_last = (i == len(items) - 1)
-            # Calculate next indentation prefix for child elements
-            if is_root:
-                next_prefix = ""
+    # Stack entries: (path, prefix, is_last, is_root, marker)
+    # marker, when set, is appended to the item's line and the item's
+    # children are never traversed (used for unsafe/outside-root symlinks).
+    stack: list[tuple[Path, str, bool, bool, str | None]] = [
+        (path, prefix, is_last, is_root, None)
+    ]
+
+    while stack:
+        current, cur_prefix, cur_is_last, cur_is_root, marker = stack.pop()
+
+        # Resolve the deferred marker for directory symlinks: known-visited
+        # targets are cycles/duplicates, the rest are simply not followed.
+        if marker == _DIR_SYMLINK_MARKER:
+            try:
+                link_stat = current.stat()
+                link_key = (link_stat.st_dev, link_stat.st_ino)
+            except OSError:
+                link_key = None
+            if link_key is not None and link_key in visited_dirs:
+                marker = "cyclic or duplicate link — already traversed, skipped"
             else:
-                next_prefix = prefix + ("    " if is_last else "│   ")
-            
-            lines.extend(build_tree_lines(item, root_dir, next_prefix, item_is_last, is_root=False))
+                marker = "directory symlink — not followed"
+
+        if cur_is_root:
+            lines.append(f"{current.name}/")
+        else:
+            connector = "└── " if cur_is_last else "├── "
+            is_directory = current.is_dir() if marker is None else False
+            display_name = current.name + ("/" if is_directory else "")
+            display_name += _link_suffix(current)
+            note = ""
+            if marker is not None:
+                note = f"  [{marker}]"
+            elif not is_directory and skipped_files and current in skipped_files:
+                note = f"  [skipped: {skipped_files[current]}]"
+            lines.append(f"{cur_prefix}{connector}{display_name}{note}")
+
+        if marker is not None:
+            # Explicitly blocked item: shown for visibility, never traversed.
+            continue
+
+        if current.is_dir():
+            # Cycle/duplicate detection: track (device, inode) of directories.
+            try:
+                dir_stat = current.stat()
+                dir_key = (dir_stat.st_dev, dir_stat.st_ino)
+            except OSError:
+                dir_key = None
+
+            child_prefix = "" if cur_is_root else cur_prefix + ("    " if cur_is_last else "│   ")
+
+            if dir_key is not None:
+                if dir_key in visited_dirs:
+                    lines.append(f"{child_prefix}└── [cyclic or duplicate link — already traversed, skipped]")
+                    continue
+                visited_dirs.add(dir_key)
+
+            try:
+                # List directory items, sort them: directories first, then
+                # files (case-insensitive). Ignored items are filtered out.
+                entries: list[tuple[Path, str | None]] = []
+                for item in current.iterdir():
+                    if _is_outside_root(item, root_dir):
+                        # Kept visible in the tree, but never followed or packed.
+                        entries.append((item, "symlink outside project root — not followed, not packed"))
+                        continue
+                    if ignore_predicate(item):
+                        continue
+                    if exclude_resolved is not None and _is_same_path(item, exclude_resolved):
+                        # The output file itself must never appear in its own pack.
+                        continue
+                    if item.is_dir() and item.is_symlink():
+                        # Directory symlinks are visible in the tree but are
+                        # never traversed (see _collect_files). The final note
+                        # is decided when the entry is popped, based on whether
+                        # its target directory has already been traversed.
+                        entries.append((item, _DIR_SYMLINK_MARKER))
+                        continue
+                    entries.append((item, None))
+                entries.sort(key=lambda entry: (not entry[0].is_dir() if entry[1] is None else True,
+                                                entry[0].name.lower()))
+            except OSError as e:
+                # Report permission errors or system issues as a child note of
+                # the directory instead of duplicating the directory entry.
+                reason = e.strerror or str(e)
+                lines.append(f"{child_prefix}└── [Cannot access directory: {reason}]")
+                continue
+
+            # Push children in reverse order so they are processed (LIFO)
+            # in the original sorted order.
+            for i in range(len(entries) - 1, -1, -1):
+                item, item_marker = entries[i]
+                item_is_last = (i == len(entries) - 1)
+                stack.append((item, child_prefix, item_is_last, False, item_marker))
 
     return lines
 
 
-def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboard: bool = True) -> dict:
+def _collect_files(root_path: Path, output_path: Path, ignore_predicate) -> list[Path]:
     """
-    Recursively scans the project, builds an ASCII tree, gathers all text file contents,
-    saves the aggregated output to a single file, and copies it to the system clipboard.
+    Collects all files to pack using an ITERATIVE depth-first traversal.
+
+    The work stack holds both files and directories, which reproduces exactly
+    the classic recursive DFS order: for each directory its subdirectories
+    (with complete subtrees) come first, then its files, everything sorted
+    case-insensitively.
+
+    :param root_path: Root directory (resolved).
+    :param output_path: Output file to exclude from packing.
+    :param ignore_predicate: Callable(Path) -> bool.
+    :return: Ordered list of file paths to pack.
+    """
+    files_to_pack: list[Path] = []
+    visited_dirs: set[tuple[int, int]] = set()
+    work_stack: list[Path] = [root_path]
+
+    while work_stack:
+        node = work_stack.pop()
+
+        if node.is_dir():
+            try:
+                node_stat = node.stat()
+                dir_key = (node_stat.st_dev, node_stat.st_ino)
+            except OSError:
+                continue
+            if dir_key in visited_dirs:
+                # Symlink cycle or duplicate directory link.
+                continue
+            visited_dirs.add(dir_key)
+
+            try:
+                # Sort items for a deterministic walking order:
+                # directories first, then files, both case-insensitive.
+                items = sorted(node.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            except PermissionError as e:
+                print(f"Warning: Permission denied reading directory {node}: {e}", file=sys.stderr)
+                continue
+            except OSError as e:
+                # ELOOP, I/O errors and friends: warn and keep going.
+                print(f"Warning: Could not read directory {node}: {e}", file=sys.stderr)
+                continue
+
+            # Push in reverse order so the sorted DFS order is preserved
+            # when popping (both subdirectories and files go through the
+            # same work stack).
+            for item in reversed(items):
+                if ignore_predicate(item):
+                    continue
+                if item.is_dir() and item.is_symlink():
+                    # Directory symlinks are NEVER followed for packing:
+                    # files are only collected through their real paths, so
+                    # no aliased paths and no cycles can occur. The symlink
+                    # stays visible in the directory tree (see build_tree_lines).
+                    continue
+                work_stack.append(item)
+
+        elif node.is_file():
+            # Avoid packing the output file itself.
+            if _is_same_path(node, output_path):
+                continue
+            files_to_pack.append(node)
+
+    return files_to_pack
+
+
+def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboard: bool = True,
+                 *, max_file_size: int | None = None, output_format: str = "text",
+                 exclude_patterns=None, respect_gitignore: bool = True) -> dict:
+    """
+    Recursively scans the project, builds an ASCII tree, gathers all text file
+    contents, saves the aggregated output to a single file and (optionally)
+    copies it to the system clipboard.
 
     :param root_dir: Path to the root folder of the project.
     :param output_file: Path to the target output text file.
     :param copy_to_clipboard: Whether to copy the generated context to the clipboard.
-    :return: Dictionary containing execution statistics.
+    :param max_file_size: Optional maximum file size in bytes; larger files
+                          are skipped with a warning and marked in the tree.
+    :param output_format: 'text' (classic markers) or 'markdown' (fenced blocks).
+    :param exclude_patterns: Optional iterable of glob patterns (--exclude),
+                             matched against the relative POSIX path and the file name.
+    :param respect_gitignore: Honor .pyaiignore/.gitignore files when the
+                              optional 'pathspec' dependency is installed.
+    :return: Dictionary with execution statistics (file counts, size, lines,
+             estimated tokens, clipboard status, ...).
     """
+    if output_format not in available_formats():
+        raise ValueError(
+            f"Unsupported output format '{output_format}'. "
+            f"Available formats: {', '.join(available_formats())}."
+        )
+
     root_path = Path(root_dir).resolve()
     output_path = Path(output_file).resolve()
 
     if not root_path.exists() or not root_path.is_dir():
         raise FileNotFoundError(f"The specified directory '{root_path}' does not exist or is not a directory.")
 
-    # 1. Generate the ASCII directory tree
-    tree_lines = build_tree_lines(root_path, root_path, is_root=True)
-    tree_text = "\n".join(tree_lines)
+    matcher = load_ignore_matcher(root_path) if respect_gitignore else None
+    ignore_predicate = make_filter(root_path, patterns=exclude_patterns or (), matcher=matcher)
 
-    # 2. Collect all allowed files for code packing
-    files_to_pack = []
+    # 1. Collect all files allowed for packing (iterative, cycle-safe,
+    #    deterministic DFS order).
+    files_to_pack = _collect_files(root_path, output_path, ignore_predicate)
 
-    def recursive_walk(current_dir: Path):
-        try:
-            # Sort items for a deterministic walking order
-            items = sorted(current_dir.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
-        except PermissionError as e:
-            print(f"Warning: Permission denied reading directory {current_dir}: {e}", file=sys.stderr)
-            return
-
-        for item in items:
-            if should_ignore(item, root_path):
-                continue
-            if item.is_dir():
-                recursive_walk(item)
-            elif item.is_file():
-                # Avoid packing the output file itself if it is located inside the root project directory
-                if item.resolve() == output_path:
-                    continue
-                files_to_pack.append(item)
-
-    recursive_walk(root_path)
-
-    # 3. Read file contents and format blocks
-    content_blocks = []
-    packed_count = 0
-    failed_count = 0
+    # 2. Read file contents and format blocks
+    content_blocks: list[str] = []
+    skipped_files: dict[Path, str] = {}
+    total_source_lines = 0
 
     for file_path in files_to_pack:
         try:
@@ -186,62 +334,78 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         except ValueError:
             rel_path = file_path.as_posix() if hasattr(file_path, "as_posix") else str(file_path)
 
-        try:
-            # Read files using UTF-8 encoding
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+        # Optional per-file size limit.
+        if max_file_size is not None:
+            try:
+                file_size = file_path.stat().st_size
+            except OSError:
+                file_size = 0
+            if file_size > max_file_size:
+                reason = f"file exceeds size limit ({_format_bytes(file_size)} > {_format_bytes(max_file_size)})"
+                print(f"Warning: Skipped '{rel_path}' ({reason}).", file=sys.stderr)
+                skipped_files[file_path] = f"exceeds size limit ({_format_bytes(max_file_size)})"
+                continue
 
-            # Format the code block with clean delimiters
-            block = f"--- START OF FILE: {rel_path} ---\n{content}\n--- END OF FILE: {rel_path} ---"
-            content_blocks.append(block)
-            packed_count += 1
-        except UnicodeDecodeError:
-            # Handle binary files that cannot be decoded as standard text
-            print(f"Warning: Skipped '{rel_path}' due to encoding error (likely a binary file).", file=sys.stderr)
-            failed_count += 1
-        except PermissionError:
-            print(f"Warning: Skipped '{rel_path}' due to permission error.", file=sys.stderr)
-            failed_count += 1
-        except Exception as e:
-            print(f"Warning: Skipped '{rel_path}' due to an error: {e}", file=sys.stderr)
-            failed_count += 1
+        content, error_reason = read_text_content(file_path)
 
-    # 4. Formulate the single aggregated output
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    header = (
-        "================================================================================\n"
-        f"PROJECT CONTEXT PACK: {root_path.name}\n"
-        f"Generated on: {timestamp}\n"
-        f"Total files packed: {packed_count}\n"
-        "================================================================================\n"
+        if content is None:
+            # Unreadable/undecodable/binary files are skipped gracefully.
+            print(f"Warning: Skipped '{rel_path}' ({error_reason}).", file=sys.stderr)
+            skipped_files[file_path] = error_reason
+            continue
+
+        total_source_lines += count_lines(content)
+        content_blocks.append(format_file_block(rel_path, content, output_format))
+
+    packed_count = len(content_blocks)
+    failed_count = len(skipped_files)
+
+    # 3. Generate the ASCII directory tree (AFTER reading files, so entries
+    #    that failed to read can be visibly marked).
+    tree_lines = build_tree_lines(
+        root_path,
+        root_path,
+        is_root=True,
+        exclude_path=output_path,
+        skipped_files=skipped_files,
+        ignore_predicate=ignore_predicate,
     )
+    tree_text = "\n".join(tree_lines)
 
-    tree_section = (
-        "================================================================================\n"
-        "DIRECTORY TREE\n"
-        "================================================================================\n"
-        f"{tree_text}\n"
-    )
+    # 4. Assemble the complete output document and compute statistics.
+    #    Token statistics are computed over the final document, so they
+    #    describe exactly what would be pasted into the LLM.
+    stats = {
+        "project_name": root_path.name,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "packed_count": packed_count,
+        "failed_count": failed_count,
+        "total_lines": 0,
+        "estimated_tokens": 0,
+        "token_method": "",
+    }
 
-    files_section_header = (
-        "================================================================================\n"
-        "FILES CONTENT\n"
-        "================================================================================\n"
-    )
+    full_output = assemble_output(stats, tree_text, content_blocks, output_format)
 
-    files_content = "\n\n".join(content_blocks)
-    full_output = f"{header}\n{tree_section}\n{files_section_header}\n{files_content}\n"
+    stats["total_lines"] = count_lines(full_output)
+    estimated_tokens, token_method = count_tokens(full_output)
+    stats["estimated_tokens"] = estimated_tokens
+    stats["token_method"] = token_method
+
+    # Re-assemble once with the final statistics embedded in the header.
+    full_output = assemble_output(stats, tree_text, content_blocks, output_format)
 
     # 5. Write to the output file
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
+        with open(output_path, "w", encoding="utf-8", newline="") as f:
             f.write(full_output)
     except Exception as e:
         raise IOError(f"Failed to write results to '{output_path}': {e}")
 
-    # 6. Copy to the system clipboard if enabled
+    # 6. Copy to the system clipboard if enabled. Any failure is reported to
+    #    the caller through the returned statistics (the CLI renders the
+    #    warning exactly once) instead of printing here.
     clipboard_copied = False
     clipboard_error = None
 
@@ -251,7 +415,6 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
             clipboard_copied = True
         except Exception as e:
             clipboard_error = str(e)
-            print(f"Warning: Could not copy to clipboard: {e}", file=sys.stderr)
 
     return {
         "root_dir": str(root_path),
@@ -260,5 +423,19 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         "failed_count": failed_count,
         "clipboard_copied": clipboard_copied,
         "clipboard_error": clipboard_error,
-        "file_size": len(full_output)
+        "file_size": len(full_output),
+        "total_lines": stats["total_lines"],
+        "total_source_lines": total_source_lines,
+        "estimated_tokens": estimated_tokens,
+        "token_method": token_method,
+        "output_format": output_format,
     }
+
+
+def _format_bytes(num_bytes: int) -> str:
+    """Formats a byte count as a short human-readable string."""
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < 1024 ** 2:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes / (1024 ** 2):.2f} MB"

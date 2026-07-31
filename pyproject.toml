@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "py-for-ai"
-version = "0.1.1"
+version = "0.2.0"
 description = "A command-line utility to pack Python codebases into a single text file for AI context, with clipboard support."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -23,6 +23,16 @@ dependencies = [
     "pyperclip>=1.8.2",
 ]
 
+[project.optional-dependencies]
+# Accurate token counting (cl100k_base) instead of the built-in heuristic.
+tokens = ["tiktoken>=0.5"]
+# Respect .gitignore / .pyaiignore files.
+gitignore = ["pathspec>=0.12"]
+# Everything above.
+all = ["tiktoken>=0.5", "pathspec>=0.12"]
+# Development & testing.
+dev = ["pytest>=7.0", "tiktoken>=0.5", "pathspec>=0.12"]
+
 [project.urls]
 Homepage = "https://github.com/Maksum867/py-ai"
 
@@ -32,3 +42,6 @@ py-ai = "py_ai.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/py_ai"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

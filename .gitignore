@@ -1,3 +1,7 @@
 .venv/
 .idea/
 dist/
+build/
+__pycache__/
+*.egg-info/
+ai_context.txt
