@@ -1,12 +1,11 @@
 """Tests for py_ai.filters (ignore rules, user patterns, combined filter)."""
 
-import pytest
 
 from py_ai.filters import (
+    _is_outside_root,
+    make_filter,
     matches_user_patterns,
     should_ignore,
-    make_filter,
-    _is_outside_root,
 )
 
 

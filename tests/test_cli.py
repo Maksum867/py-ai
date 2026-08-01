@@ -2,9 +2,8 @@
 
 import sys
 
-import pytest
-
 import pyperclip
+import pytest
 
 from py_ai import __version__
 from py_ai.cli import main, parse_size

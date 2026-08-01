@@ -10,7 +10,7 @@ def _write(tmp_path, name, raw: bytes):
 
 
 def test_plain_utf8(tmp_path):
-    f = _write(tmp_path, "a.py", "print('ї')\n".encode("utf-8"))
+    f = _write(tmp_path, "a.py", "print('ї')\n".encode())
     content, err = read_text_content(f)
     assert err is None
     assert content == "print('ї')\n"

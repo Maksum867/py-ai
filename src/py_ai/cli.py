@@ -197,7 +197,7 @@ def main():
     except FileNotFoundError as e:
         print(f"❌ Error: {e}", file=sys.stderr)
         sys.exit(1)
-    except IOError as e:
+    except OSError as e:
         print(f"❌ Write Error: {e}", file=sys.stderr)
         sys.exit(1)
     except ValueError as e:

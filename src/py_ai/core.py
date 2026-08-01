@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+
 import pyperclip
 
 from py_ai.filters import (
@@ -56,10 +57,10 @@ __all__ = [
     "ALLOWED_HIDDEN_FILES",
     "IGNORED_EXTENSIONS",
     "IGNORED_NAMES",
-    "should_ignore",
-    "read_text_content",
     "build_tree_lines",
     "pack_project",
+    "read_text_content",
+    "should_ignore",
 ]
 
 
@@ -432,7 +433,7 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         with open(output_path, "w", encoding="utf-8", newline="") as f:
             f.write(full_output)
     except Exception as e:
-        raise IOError(f"Failed to write results to '{output_path}': {e}")
+        raise OSError(f"Failed to write results to '{output_path}': {e}")
 
     # Report the REAL on-disk size in bytes (len() counts characters, which
     # understates the size of non-ASCII content, e.g. Cyrillic in UTF-8).
