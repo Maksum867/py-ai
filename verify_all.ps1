@@ -83,8 +83,10 @@ Check ($code -eq 0) "compileall src tests"
 
 $code = Py "ruff" @("--version")
 if ($code -eq 0) {
-    $code = Py "ruff" @("check", "src", "tests")
-    Check ($code -eq 0) "ruff check src tests"
+    & python -m ruff check src tests
+    $code = $LASTEXITCODE
+    if ($code -eq 0) { Ok "ruff check src tests" }
+    else { Bad "ruff check src tests (see details above); try: python -m ruff check src tests --fix" }
 } else {
     Warn "ruff not installed - lint step skipped (pip install ruff to enable)"
 }
@@ -150,7 +152,12 @@ Write-Host "`n== 4. Git hygiene ==" -ForegroundColor Cyan
 
 if (Test-Path ".git") {
     $junk = git ls-files | Select-String -Pattern "__pycache__|\.idea|\.pyc$|\.pytest_cache"
-    Check ($null -eq $junk) "no junk tracked (.idea/ __pycache__/ *.pyc)"
+    if ($null -ne $junk) {
+        Bad "no junk tracked (.idea/ __pycache__/ *.pyc)"
+        Write-Host "       HINT: run  git rm -r --cached .idea src/py_ai/__pycache__  then  git add -A  and  git commit" -ForegroundColor Yellow
+    } else {
+        Ok "no junk tracked (.idea/ __pycache__/ *.pyc)"
+    }
     $status = git status --porcelain
     if ($status) { Warn "uncommitted changes present (commit before publishing)" }
     else { Ok "git status clean" }

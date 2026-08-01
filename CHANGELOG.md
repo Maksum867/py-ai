@@ -12,6 +12,12 @@
 - **Stale type annotations** for the visited-directories set (`core.py`):
   they describe the actual `_dir_identity()` keys.
 - Docs: removed the brittle hardcoded test count from the README.
+- Added `verify_all.ps1`: one-file pre-release verification (tests, lint,
+  CLI smoke, git hygiene, build, wheel smoke).
+- **Ruff lint fixes** (`src/`, `tests/`): sorted imports/`__all__`, removed an
+  unused import, `IOError` → `OSError` (alias in Python 3), dropped a
+  redundant UTF-8 argument; added a `[tool.ruff]` config documenting the
+  intentionally-ignored rules (`BLE001`, `S110`, `DTZ005`).
 - **Silent data loss on filesystems with unreliable inodes** (`core.py`): duplicate/cycle
   detection keyed only on `(st_dev, st_ino)` treated every directory as a duplicate when
   `st_ino` was 0 or repeated (some network/FUSE mounts), silently dropping whole subtrees.

@@ -1,5 +1,7 @@
 """Tests for py_ai.core.pack_project (output content, ordering, formats, limits)."""
 
+from __future__ import annotations
+
 import pytest
 
 from py_ai.core import pack_project
@@ -245,7 +247,7 @@ def test_collect_files_survives_zero_inodes(tmp_path, monkeypatch):
     silently treated as duplicates (which used to drop whole subtrees)."""
     import os
 
-    import py_ai.core as core
+    from py_ai import core
 
     root = tmp_path / "proj"
     (root / "dir1").mkdir(parents=True)

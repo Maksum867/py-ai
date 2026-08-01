@@ -337,12 +337,12 @@ def matches_ignore_files(path: Path, root_dir: Path, matcher) -> bool:
         rel_posix = path.relative_to(root_dir).as_posix()
     except ValueError:
         return False
-    if matcher.match_file(rel_posix):
-        return True
-    # Directory patterns like 'build/' only match paths with a trailing slash.
-    if path.is_dir() and matcher.match_file(rel_posix + "/"):
-        return True
-    return False
+    # A plain pattern or a directory pattern ('build/' matches only with a
+    # trailing slash) can ignore the path.
+    return (
+        matcher.match_file(rel_posix)
+        or (path.is_dir() and matcher.match_file(rel_posix + "/"))
+    )
 
 
 def make_filter(root_dir: Path, patterns=(), matcher=None):
@@ -358,12 +358,10 @@ def make_filter(root_dir: Path, patterns=(), matcher=None):
     root_dir = Path(root_dir)
 
     def _ignore(path: Path) -> bool:
-        if should_ignore(path, root_dir):
-            return True
-        if matches_user_patterns(path, root_dir, patterns):
-            return True
-        if matches_ignore_files(path, root_dir, matcher):
-            return True
-        return False
+        return (
+            should_ignore(path, root_dir)
+            or matches_user_patterns(path, root_dir, patterns)
+            or matches_ignore_files(path, root_dir, matcher)
+        )
 
     return _ignore
