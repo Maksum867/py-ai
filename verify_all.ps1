@@ -41,6 +41,11 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host " py-for-ai full verification" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
+# Single source of truth for the version: pyproject.toml (avoids drift).
+$version = (Select-String -Path "pyproject.toml" -Pattern '^version = "([^"]+)"').Matches.Groups[1].Value
+if (-not $version) { Write-Host "Cannot read version from pyproject.toml" -ForegroundColor Red; exit 1 }
+Write-Host "Version under test: $version" -ForegroundColor Cyan
+
 # ---------------------------------------------------------------- 0. Environment
 Write-Host "`n== 0. Environment ==" -ForegroundColor Cyan
 
@@ -94,8 +99,14 @@ if ($code -eq 0) {
 # ---------------------------------------------------------------- 3. CLI smoke
 Write-Host "`n== 3. CLI smoke ==" -ForegroundColor Cyan
 
-$demo = Join-Path $env:TEMP ("pyai_verify_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
-New-Item -ItemType Directory -Force "$demo\sub" | Out-Null
+# Demo project lives in $demo; ALL pack outputs go to $outDir OUTSIDE the
+# demo dir. If outputs were written inside the demo, a previous pack file
+# would be packed into the next one (leftover-pack problem) and could make
+# checks like "--no-tree" fail spuriously.
+$demo  = Join-Path $env:TEMP ("pyai_verify_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+$outDir = Join-Path $env:TEMP ("pyai_out_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+New-Item -ItemType Directory -Force "$demo\sub"  | Out-Null
+New-Item -ItemType Directory -Force $outDir      | Out-Null
 Set-Content "$demo\app.py"          'print("hi")'     -Encoding ascii
 Set-Content "$demo\.env"            'SECRET=hunter2'  -Encoding ascii
 Set-Content "$demo\.gitignore"      '*.log'           -Encoding ascii
@@ -105,15 +116,15 @@ Set-Content "$demo\sub\secret.tmp"  'tmp'             -Encoding ascii
 [IO.File]::WriteAllBytes((Join-Path $demo "dump.bin"), [byte[]](0, 1, 2, 3))
 
 $verOut = (python -m py_ai --version 2>&1 | Out-String).Trim()
-Check ($verOut -match "0\.2\.0") "pyai --version -> $verOut"
+Check ($verOut -match [regex]::Escape($version)) "pyai --version -> $verOut"
 
 Push-Location $demo
-python -m py_ai . --no-clipboard -o ctx.txt 2>&1 | Out-Null
+python -m py_ai . --no-clipboard -o "$outDir\ctx.txt" 2>&1 | Out-Null
 $code1 = $LASTEXITCODE
 Pop-Location
 Check ($code1 -eq 0) "pack run exits 0"
 
-$out = Get-Content (Join-Path $demo "ctx.txt") -Raw
+$out = Get-Content (Join-Path $outDir "ctx.txt") -Raw
 Check ($out -like "*START OF FILE: app.py ---*")              "app.py packed"
 Check ($out -notlike "*SECRET=hunter2*")                      ".env not packed (no secret leak)"
 Check ($out -notlike "*START OF FILE: debug.log*")            ".gitignore '*.log' respected"
@@ -121,39 +132,41 @@ Check ($out -notlike "*START OF FILE: sub/secret.tmp*")       "nested .gitignore
 Check ($out -notlike "*START OF FILE: dump.bin*")             "binary file skipped"
 Check ($out -like "*START OF FILE: .gitignore ---*")          "allowlisted .gitignore packed"
 
+# leftover default-name pack inside the project must not be re-packed
+Set-Content "$demo\ai_context.txt" 'OLD PACK CONTENT' -Encoding ascii
 Push-Location $demo
-python -m py_ai . --no-clipboard -o ctx2.txt 2>&1 | Out-Null
+python -m py_ai . --no-clipboard -o "$outDir\ctx2.txt" 2>&1 | Out-Null
 $code2 = $LASTEXITCODE
 Pop-Location
 Check ($code2 -eq 0) "second pack run exits 0"
-$out2 = Get-Content (Join-Path $demo "ctx2.txt") -Raw
-Check ($out2 -notlike "*START OF FILE: ai_context.txt*")      "leftover ai_context.txt not re-packed"
+$out2 = Get-Content (Join-Path $outDir "ctx2.txt") -Raw
+Check ($out2 -notlike "*OLD PACK CONTENT*")                  "leftover ai_context.txt not re-packed"
 
 Push-Location $demo
-python -m py_ai . --no-clipboard --no-gitignore -o ctx3.txt 2>&1 | Out-Null
+python -m py_ai . --no-clipboard --no-gitignore -o "$outDir\ctx3.txt" 2>&1 | Out-Null
 Pop-Location
-$out3 = Get-Content (Join-Path $demo "ctx3.txt") -Raw
+$out3 = Get-Content (Join-Path $outDir "ctx3.txt") -Raw
 Check ($out3 -like "*START OF FILE: debug.log*")              "--no-gitignore re-packs *.log"
 
 # new feature flags (group 1)
 Push-Location $demo
-python -m py_ai . --no-clipboard --no-tree -o ctx4.txt 2>&1 | Out-Null
+python -m py_ai . --no-clipboard --no-tree -o "$outDir\ctx4.txt" 2>&1 | Out-Null
 Pop-Location
-$out4 = Get-Content (Join-Path $demo "ctx4.txt") -Raw
+$out4 = Get-Content (Join-Path $outDir "ctx4.txt") -Raw
 Check ($out4 -notlike "*DIRECTORY TREE*")                     "--no-tree omits the tree section"
 Check ($out4 -like "*START OF FILE: app.py ---*")             "  ...but content still packed"
 
 Push-Location $demo
-python -m py_ai . --no-clipboard --no-token-count -o ctx5.txt 2>&1 | Out-Null
+python -m py_ai . --no-clipboard --no-token-count -o "$outDir\ctx5.txt" 2>&1 | Out-Null
 Pop-Location
-$out5 = Get-Content (Join-Path $demo "ctx5.txt") -Raw
+$out5 = Get-Content (Join-Path $outDir "ctx5.txt") -Raw
 Check ($out5 -like "*Estimated tokens: disabled*")            "--no-token-count disables estimation"
 
 Push-Location $demo
-$quietOut = (python -m py_ai . --no-clipboard --quiet -o ctx6.txt 2>&1 | Out-String).Trim()
+$quietOut = (python -m py_ai . --no-clipboard --quiet -o "$outDir\ctx6.txt" 2>&1 | Out-String).Trim()
 Pop-Location
 Check ($quietOut -eq "")                                      "--quiet prints nothing on stdout"
-Check (Test-Path (Join-Path $demo "ctx6.txt"))                "  ...but still writes the output file"
+Check (Test-Path (Join-Path $outDir "ctx6.txt"))              "  ...but still writes the output file"
 
 # exit codes
 Push-Location $demo
@@ -165,7 +178,8 @@ Check ($e1 -eq 1) "missing dir exits 1 (got $e1)"
 Check ($e2 -eq 2) "max-file-size 0 exits 2 (got $e2)"
 Check ($e3 -eq 2) "invalid --format exits 2 (got $e3)"
 
-Remove-Item -Recurse -Force $demo -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force $demo  -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force $outDir -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------- 4. Git hygiene
 Write-Host "`n== 4. Git hygiene ==" -ForegroundColor Cyan
@@ -213,7 +227,7 @@ if (-not $SkipBuild) {
         & $wvPy -m pip install -q $whl.FullName 2>&1 | Out-Null
         Check ($LASTEXITCODE -eq 0) "wheel installs in clean venv"
         $wvVer = (& $wvPy -m py_ai --version 2>&1 | Out-String).Trim()
-        Check ($wvVer -match "0\.2\.0") "installed pyai --version -> $wvVer"
+        Check ($wvVer -match [regex]::Escape($version)) "installed pyai --version -> $wvVer"
         & $wvPy -m pip check 2>&1 | Out-Null
         Check ($LASTEXITCODE -eq 0) "pip check in wheel venv"
     } else {

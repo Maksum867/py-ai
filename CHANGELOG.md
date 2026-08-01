@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-08-01
 
 ### Added
 - **`--quiet` / `-q` and `--verbose` / `-v`** (`cli.py`): suppress all
