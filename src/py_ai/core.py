@@ -48,6 +48,10 @@ from py_ai.tokens import count_lines, count_tokens
 # human-readable note is chosen when the entry is popped and rendered.
 _DIR_SYMLINK_MARKER = "__pyai_dir_symlink__"
 
+# Default output file names that must never be packed, even when they exist
+# in the project from a previous run with a different output path.
+_DEFAULT_OUTPUT_NAMES = {"ai_context.txt"}
+
 __all__ = [
     "ALLOWED_HIDDEN_FILES",
     "IGNORED_EXTENSIONS",
@@ -80,6 +84,29 @@ def _link_suffix(path: Path) -> str:
     return ""
 
 
+def _dir_identity(path: Path):
+    """
+    Returns a stable identity key for a directory (used to detect duplicate
+    traversal / cycles), or None when it cannot be determined.
+
+    Prefers the ``(st_dev, st_ino)`` pair, but falls back to the resolved
+    absolute path on filesystems where inodes are unreliable (e.g. ``st_ino``
+    is 0 or repeated on some network/FUSE mounts). Relying on inodes alone
+    caused *silent* loss of whole subtrees there: every directory after the
+    first was treated as a duplicate and skipped.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if st.st_dev and st.st_ino:
+        return ("inode", st.st_dev, st.st_ino)
+    try:
+        return ("path", os.path.normcase(os.path.realpath(os.fspath(path))))
+    except OSError:
+        return None
+
+
 def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool = True,
                      is_root: bool = False, exclude_path: Path | None = None,
                      skipped_files: dict[Path, str] | None = None,
@@ -109,7 +136,9 @@ def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool
         ignore_predicate = make_filter(root_dir)
 
     lines: list[str] = []
-    visited_dirs: set[tuple[int, int]] = set()
+    # Keys come from _dir_identity(): either ("inode", st_dev, st_ino) or
+    # ("path", resolved) — a plain tuple is the accurate common type.
+    visited_dirs: set[tuple] = set()
 
     exclude_resolved = None
     if exclude_path is not None:
@@ -131,13 +160,9 @@ def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool
         # Resolve the deferred marker for directory symlinks: known-visited
         # targets are cycles/duplicates, the rest are simply not followed.
         if marker == _DIR_SYMLINK_MARKER:
-            try:
-                link_stat = current.stat()
-                link_key = (link_stat.st_dev, link_stat.st_ino)
-            except OSError:
-                link_key = None
+            link_key = _dir_identity(current)
             if link_key is not None and link_key in visited_dirs:
-                marker = "cyclic or duplicate link — already traversed, skipped"
+                marker = "cyclic or duplicate link — already traversed, not followed"
             else:
                 marker = "directory symlink — not followed"
 
@@ -160,18 +185,15 @@ def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool
             continue
 
         if current.is_dir():
-            # Cycle/duplicate detection: track (device, inode) of directories.
-            try:
-                dir_stat = current.stat()
-                dir_key = (dir_stat.st_dev, dir_stat.st_ino)
-            except OSError:
-                dir_key = None
+            # Cycle/duplicate detection: track directories by a reliable
+            # identity (inode when available, resolved path otherwise).
+            dir_key = _dir_identity(current)
 
             child_prefix = "" if cur_is_root else cur_prefix + ("    " if cur_is_last else "│   ")
 
             if dir_key is not None:
                 if dir_key in visited_dirs:
-                    lines.append(f"{child_prefix}└── [cyclic or duplicate link — already traversed, skipped]")
+                    lines.append(f"{child_prefix}└── [cyclic or duplicate link — already traversed, not followed]")
                     continue
                 visited_dirs.add(dir_key)
 
@@ -188,6 +210,11 @@ def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool
                         continue
                     if exclude_resolved is not None and _is_same_path(item, exclude_resolved):
                         # The output file itself must never appear in its own pack.
+                        continue
+                    if item.parent == root_dir and item.name in _DEFAULT_OUTPUT_NAMES:
+                        # A leftover pack from a previous run that used the
+                        # default output name at the project root. Nested files
+                        # with the same name are legitimate and stay packed.
                         continue
                     if item.is_dir() and item.is_symlink():
                         # Directory symlinks are visible in the tree but are
@@ -231,17 +258,17 @@ def _collect_files(root_path: Path, output_path: Path, ignore_predicate) -> list
     :return: Ordered list of file paths to pack.
     """
     files_to_pack: list[Path] = []
-    visited_dirs: set[tuple[int, int]] = set()
+    # Keys come from _dir_identity(): either ("inode", st_dev, st_ino) or
+    # ("path", resolved) — a plain tuple is the accurate common type.
+    visited_dirs: set[tuple] = set()
     work_stack: list[Path] = [root_path]
 
     while work_stack:
         node = work_stack.pop()
 
         if node.is_dir():
-            try:
-                node_stat = node.stat()
-                dir_key = (node_stat.st_dev, node_stat.st_ino)
-            except OSError:
+            dir_key = _dir_identity(node)
+            if dir_key is None:
                 continue
             if dir_key in visited_dirs:
                 # Symlink cycle or duplicate directory link.
@@ -275,8 +302,12 @@ def _collect_files(root_path: Path, output_path: Path, ignore_predicate) -> list
                 work_stack.append(item)
 
         elif node.is_file():
-            # Avoid packing the output file itself.
+            # Avoid packing the output file itself. A leftover pack from a
+            # previous run that used the default output name at the project
+            # root is excluded too; nested files with that name are legitimate.
             if _is_same_path(node, output_path):
+                continue
+            if node.parent == root_path and node.name in _DEFAULT_OUTPUT_NAMES:
                 continue
             files_to_pack.append(node)
 
@@ -403,6 +434,13 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
     except Exception as e:
         raise IOError(f"Failed to write results to '{output_path}': {e}")
 
+    # Report the REAL on-disk size in bytes (len() counts characters, which
+    # understates the size of non-ASCII content, e.g. Cyrillic in UTF-8).
+    try:
+        disk_size = output_path.stat().st_size
+    except OSError:
+        disk_size = len(full_output.encode("utf-8"))
+
     # 6. Copy to the system clipboard if enabled. Any failure is reported to
     #    the caller through the returned statistics (the CLI renders the
     #    warning exactly once) instead of printing here.
@@ -423,7 +461,7 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         "failed_count": failed_count,
         "clipboard_copied": clipboard_copied,
         "clipboard_error": clipboard_error,
-        "file_size": len(full_output),
+        "file_size": disk_size,
         "total_lines": stats["total_lines"],
         "total_source_lines": total_source_lines,
         "estimated_tokens": estimated_tokens,

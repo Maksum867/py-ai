@@ -1,5 +1,55 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **`--exclude 'dir/'` also matched a same-named regular file** (`filters.py`):
+  a git-style directory pattern now matches only the directory itself (or
+  anything under it), not a file literally named like the pattern.
+- **`ai_context.txt` exclusion was applied at any depth** (`core.py`): only a
+  root-level leftover pack with the default output name is excluded now; a
+  legitimate nested file named `ai_context.txt` stays in the pack.
+- **Stale type annotations** for the visited-directories set (`core.py`):
+  they describe the actual `_dir_identity()` keys.
+- Docs: removed the brittle hardcoded test count from the README.
+- **Silent data loss on filesystems with unreliable inodes** (`core.py`): duplicate/cycle
+  detection keyed only on `(st_dev, st_ino)` treated every directory as a duplicate when
+  `st_ino` was 0 or repeated (some network/FUSE mounts), silently dropping whole subtrees.
+  A stable directory identity (inode when available, resolved path otherwise) is used now.
+- **`.pyaiignore` / `.gitignore` interplay** (`filters.py`): both files were compiled into
+  separate `PathSpec` objects, so `!` negation never worked across files and `.pyaiignore`
+  could not override `.gitignore`. All ignore files are now merged into a single matcher
+  (later rules win), so `.pyaiignore` correctly takes precedence.
+- **Nested `.gitignore` files were ignored** (`filters.py`): only root-level ignore files
+  were read. All ignore files inside the project are now discovered and their patterns are
+  rebased relative to the project root (git semantics).
+- **`Output Size` reported characters instead of bytes** (`core.py`): `len()` understated
+  non-ASCII content (e.g. Cyrillic in UTF-8). The on-disk byte size is reported now.
+- **Legitimate files named like ignored directories were dropped** (`filters.py`): files
+  literally named `dist`, `env`, `build`, `venv`, ... (no extension) were silently excluded
+  because directory-oriented `IGNORED_NAMES` was applied to file names too. Only
+  file-specific junk names (`.DS_Store`, `Thumbs.db`, `desktop.ini`, `.env`) filter files now.
+- **`--exclude 'dir/'` did not work** (`filters.py`): a trailing-slash pattern now excludes
+  the directory and everything under it (git-style); the `*`-crosses-`/` fnmatch behaviour is
+  documented in the README.
+- **Leftover default output packs were re-packed** (`core.py`): `ai_context.txt` from a
+  previous run is never included in a new pack, even when the new output uses another name.
+- **Misleading tree note for plain symlink aliases** (`core.py`): a normal `alias -> real`
+  directory link is now annotated as "cyclic or duplicate link — already traversed, not
+  followed" instead of "skipped".
+- **`py-ai --version` printed `pyai 0.2.0`** (`cli.py`): the program name is now derived
+  from how the tool was invoked.
+- **`--max-file-size 0` (or sub-byte sizes) was accepted** (`cli.py`): values `<= 0` are
+  rejected with a clear error instead of silently skipping every file.
+- **Potential unhandled `OSError` in the CLI banner** (`cli.py`): `Path.resolve()` is now
+  guarded.
+- **Committed junk removed from the repository**: `.idea/` and `src/py_ai/__pycache__/*.pyc`
+  are no longer tracked; `.gitignore` covers them (and more).
+- **Missing CI file**: the promised `.github/workflows/tests.yml` (3 OS × Python 3.8–3.14)
+  is now present.
+- **`verify_release.ps1` hardcoded the version**: it now reads it from `pyproject.toml`.
+- Docs: test count and supported Python versions updated.
+
 ## [0.2.0] - 2026-07-31
 
 ### Added
@@ -10,7 +60,7 @@
 - **`.pyaiignore` / `.gitignore` support** (`py_ai/filters.py`): honored when the optional dependency `pathspec` is installed (`pip install py-for-ai[gitignore]`); disable with `--no-gitignore`. A hint is printed when the files exist but the dependency is missing.
 - **`--version`** flag.
 - Optional dependency extras in `pyproject.toml`: `tokens`, `gitignore`, `all`, `dev`.
-- **Full pytest suite** (53 tests) under `tests/` covering filtering, readers/encodings, symlink safety, output ordering/formatting, CLI exit codes and edge cases (1100-deep nesting, unreadable directories).
+- **Full pytest suite** (55 tests) under `tests/` covering filtering, readers/encodings, symlink safety, output ordering/formatting, CLI exit codes and edge cases (1100-deep nesting, unreadable directories).
 - **CI** (`.github/workflows/tests.yml`): pytest matrix on Linux/Windows/macOS × Python 3.8–3.13.
 - CLI summary now also prints the output format and total line count.
 

@@ -112,3 +112,10 @@ def test_parse_size():
         parse_size("10.5XB")
     with pytest.raises(ValueError):
         parse_size("banana")
+    # zero / sub-byte sizes are rejected (would silently skip every file)
+    with pytest.raises(ValueError):
+        parse_size("0")
+    with pytest.raises(ValueError):
+        parse_size("0B")
+    with pytest.raises(ValueError):
+        parse_size("0.5B")

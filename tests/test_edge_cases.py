@@ -88,3 +88,59 @@ def test_pyaiignore_file(tmp_path):
 
     assert "keepme.py" in content_section
     assert "skipme.py" not in content_section
+
+
+def test_nested_gitignore_is_honored(tmp_path):
+    """A .gitignore inside a subdirectory applies to that subtree."""
+    pytest.importorskip("pathspec")
+
+    root = tmp_path / "nested"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
+    (root / "sub" / "secret.tmp").write_text("x", encoding="utf-8")
+    (root / "sub" / "ok.txt").write_text("y", encoding="utf-8")
+
+    out = tmp_path / "pack.txt"
+    pack_project(root, out, copy_to_clipboard=False)
+    content_section = out.read_text(encoding="utf-8").split("FILES CONTENT")[1]
+
+    assert "--- START OF FILE: sub/ok.txt ---" in content_section
+    assert "--- START OF FILE: sub/secret.tmp ---" not in content_section
+
+
+def test_pyaiignore_negation_overrides_gitignore(tmp_path):
+    """Rules in .pyaiignore (later, tool-specific) must be able to re-include
+    files ignored by .gitignore via '!' negation."""
+    pytest.importorskip("pathspec")
+
+    root = tmp_path / "prio"
+    root.mkdir()
+    (root / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    (root / ".pyaiignore").write_text("!keep.log\n", encoding="utf-8")
+    (root / "keep.log").write_text("important", encoding="utf-8")
+    (root / "drop.log").write_text("junk", encoding="utf-8")
+
+    out = tmp_path / "pack.txt"
+    pack_project(root, out, copy_to_clipboard=False)
+    content_section = out.read_text(encoding="utf-8").split("FILES CONTENT")[1]
+
+    assert "--- START OF FILE: keep.log ---" in content_section     # re-included
+    assert "--- START OF FILE: drop.log ---" not in content_section  # still ignored
+
+
+def test_gitignore_negation_does_not_leak_into_pyaiignore_rules(tmp_path):
+    """The reverse direction: .pyaiignore '*' must beat .gitignore '!keep'.
+    (A later rule in the merged matcher wins.)"""
+    pytest.importorskip("pathspec")
+
+    root = tmp_path / "prio2"
+    root.mkdir()
+    (root / ".gitignore").write_text("!keep.log\n", encoding="utf-8")
+    (root / ".pyaiignore").write_text("*.log\n", encoding="utf-8")
+    (root / "keep.log").write_text("important", encoding="utf-8")
+
+    out = tmp_path / "pack.txt"
+    pack_project(root, out, copy_to_clipboard=False)
+    content_section = out.read_text(encoding="utf-8").split("FILES CONTENT")[1]
+
+    assert "--- START OF FILE: keep.log ---" not in content_section

@@ -52,6 +52,18 @@ IGNORED_EXTENSIONS = {
     '.docx', '.xlsx', '.pptx', '.doc', '.xls', '.ppt'
 }
 
+# File names that are ignored even when they are plain FILES (not
+# directories). The generic IGNORED_NAMES set contains *directory* names
+# (build, dist, env, venv, node_modules, ...) and must NOT be applied to
+# regular files: a legitimate script named 'dist' or 'env' would otherwise
+# be silently dropped from the pack.
+IGNORED_FILE_NAMES = {
+    # OS junk files
+    '.DS_Store', 'Thumbs.db', 'desktop.ini',
+    # Secrets files (also covered by the hidden-file rule; kept for clarity)
+    '.env',
+}
+
 # Hidden files (starting with a dot) are ignored by default, EXCEPT these
 # explicitly allowed, commonly useful configuration files.
 # Stored lowercase; the comparison in should_ignore() is case-insensitive.
@@ -116,11 +128,19 @@ def should_ignore(path: Path, root_dir: Path) -> bool:
         # root. Ignore it so external files are never packed.
         return True
 
+    is_file = path.is_file()
+
     # Check each part of the relative path.
     # If any parent folder is in the ignored list, ignore the entire subtree.
-    for part in rel_path.parts:
+    # The LAST component is the item's own name: for regular files it must
+    # NOT be matched against the directory-oriented IGNORED_NAMES set (a
+    # legitimate script named 'dist' or 'env' would be silently dropped);
+    # file-specific junk names are handled below.
+    parts = rel_path.parts
+    for index, part in enumerate(parts):
+        is_last = index == len(parts) - 1
         lowered = part.lower()
-        if lowered in IGNORED_NAMES:
+        if lowered in IGNORED_NAMES and not (is_file and is_last):
             return True
 
         # Python packaging artifacts are named "<pkg>.egg-info", not ".egg-info"
@@ -133,33 +153,103 @@ def should_ignore(path: Path, root_dir: Path) -> bool:
         if part.startswith('.') and lowered not in ALLOWED_HIDDEN_FILES:
             return True
 
-    # Additional file-level checks for extensions and file names
-    if path.is_file():
+    # Additional file-level checks for extensions and file names.
+    # Only FILE-specific names are checked here (IGNORED_FILE_NAMES);
+    # directory names from IGNORED_NAMES must never filter regular files.
+    if is_file:
         if path.suffix.lower() in IGNORED_EXTENSIONS:
             return True
-        if path.name.lower() in IGNORED_NAMES:
+        if path.name.lower() in IGNORED_FILE_NAMES:
             return True
 
     return False
 
 
+def _find_ignore_files(root_dir: Path) -> list[tuple[Path, str]]:
+    """
+    Collects every '.pyaiignore' / '.gitignore' file inside the project.
+
+    :param root_dir: Root directory of the project.
+    :return: List of ``(base_dir, file_name)`` pairs, ordered so that rules
+             applied later win (git semantics): root files first, then deeper
+             files; at the same level '.pyaiignore' (tool-specific) comes
+             after '.gitignore' so it can override it.
+    """
+    found: list[tuple[Path, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        # Never descend into ignored directory subtrees (perf + correctness).
+        dirnames[:] = [
+            d for d in dirnames
+            if d.lower() not in IGNORED_NAMES and not d.lower().endswith(".egg-info")
+        ]
+        base = Path(dirpath)
+        for name in IGNORE_FILE_NAMES:
+            if name in filenames:
+                found.append((base, name))
+
+    def _key(item: tuple[Path, str]) -> tuple:
+        depth = len(item[0].relative_to(root_dir).parts)
+        # .gitignore (0) before .pyaiignore (1) at the same depth.
+        is_pyaiignore = item[1] == ".pyaiignore"
+        return (depth, is_pyaiignore, item[0].as_posix())
+
+    found.sort(key=_key)
+    return found
+
+
+def _rebase_ignore_line(line: str, rel_dir: str) -> str:
+    """
+    Rebases one ignore pattern so it is relative to the project root.
+
+    Git semantics: patterns inside 'sub/.gitignore' apply only inside 'sub/',
+    so they are prefixed with 'sub/'. The '!' negation prefix and anchored
+    '/' leading slashes are preserved. Comments/blank lines pass through.
+    """
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return line
+    if not rel_dir:
+        return stripped
+
+    negate = ""
+    pattern = stripped
+    if pattern.startswith("!"):
+        negate = "!"
+        pattern = pattern[1:].lstrip()
+    # An anchored pattern ('/foo') is relative to the ignore file's own dir.
+    pattern = pattern.lstrip("/")
+    if pattern:
+        return f"{negate}{rel_dir}/{pattern}"
+    return line
+
+
 def load_ignore_matcher(root_dir: Path):
     """
-    Loads '.pyaiignore' and/or '.gitignore' files located at the project root
-    into a single matcher, when the optional 'pathspec' package is available.
+    Loads all '.pyaiignore' / '.gitignore' files inside the project into a
+    SINGLE matcher, when the optional 'pathspec' package is available.
+
+    Merging everything into one PathSpec is important: negation rules ('!')
+    only work within one spec, so separate specs would make it impossible for
+    '.pyaiignore' to re-include / override rules from '.gitignore' (and vice
+    versa). Nested ignore files are discovered and their patterns are rebased
+    relative to the project root.
 
     :param root_dir: Root directory of the project.
     :return: A 'pathspec.PathSpec' matcher, or None when the dependency is
              missing or no ignore files exist.
     """
-    found_files = [root_dir / name for name in IGNORE_FILE_NAMES if (root_dir / name).is_file()]
+    root_dir = Path(root_dir)
+    found_files = _find_ignore_files(root_dir)
     if not found_files:
         return None
 
     try:
         import pathspec
     except ImportError:
-        names = ", ".join(f.name for f in found_files)
+        names = ", ".join(f"{base.name}/{name}" if base != root_dir else name
+                          for base, name in found_files[:5])
+        if len(found_files) > 5:
+            names += f", ... ({len(found_files)} files total)"
         print(
             f"Note: ignore file(s) ({names}) found, but the optional 'pathspec' package is not "
             f"installed. Install it with 'pip install py-for-ai[gitignore]' to respect them.",
@@ -167,22 +257,28 @@ def load_ignore_matcher(root_dir: Path):
         )
         return None
 
-    matcher = None
-    for ignore_file in found_files:
+    all_lines: list[str] = []
+    for base_dir, name in found_files:
+        ignore_file = base_dir / name
         try:
             lines = ignore_file.read_text(encoding="utf-8-sig", errors="replace").splitlines()
         except OSError as e:
             print(f"Warning: could not read '{ignore_file}': {e}", file=sys.stderr)
             continue
-        # pathspec >= 0.12 renamed the 'gitwildmatch' factory to 'gitignore';
-        # fall back to the legacy name for older versions.
-        try:
-            spec = pathspec.PathSpec.from_lines("gitignore", lines)
-        except Exception:
-            spec = pathspec.PathSpec.from_lines("gitwildmatch", lines)
-        matcher = spec if matcher is None else matcher + spec
+        if base_dir == root_dir:
+            rel_dir = ""
+        else:
+            rel_dir = base_dir.relative_to(root_dir).as_posix()
+        all_lines.extend(_rebase_ignore_line(line, rel_dir) for line in lines)
+        all_lines.append("")  # blank separator between ignore files
 
-    return matcher
+    # pathspec >= 0.12 renamed the 'gitwildmatch' factory to 'gitignore';
+    # fall back to the legacy name for older versions.
+    try:
+        spec = pathspec.PathSpec.from_lines("gitignore", all_lines)
+    except Exception:
+        spec = pathspec.PathSpec.from_lines("gitwildmatch", all_lines)
+    return spec
 
 
 def matches_user_patterns(path: Path, root_dir: Path, patterns) -> bool:
@@ -190,6 +286,12 @@ def matches_user_patterns(path: Path, root_dir: Path, patterns) -> bool:
     Checks a path against user-provided glob patterns (--exclude).
     Patterns are matched (fnmatch) against the POSIX relative path and
     against the bare file name, so both 'docs/*' and '*.log' work.
+
+    Git-style directory patterns are supported: a trailing slash ('build/')
+    matches the directory itself and everything under it.
+
+    NOTE: unlike gitignore, Python's fnmatch '*' matches across '/', so
+    'docs/*' also excludes 'docs/deep/file.py'.
 
     :param path: Path to check.
     :param root_dir: Root directory of the project.
@@ -204,7 +306,18 @@ def matches_user_patterns(path: Path, root_dir: Path, patterns) -> bool:
         rel_posix = path.as_posix()
     name = path.name
     for pattern in patterns:
-        if fnmatch.fnmatch(rel_posix, pattern) or fnmatch.fnmatch(name, pattern):
+        if pattern.endswith("/"):
+            # Directory pattern ('build/'): match the directory itself (only
+            # if `path` IS a directory — a same-named file must not match) or
+            # anything under it. This keeps git-style semantics.
+            pat = pattern[:-1]
+            if not pat:
+                continue
+            if rel_posix.startswith(pat + "/"):
+                return True
+            if path.is_dir() and rel_posix == pat:
+                return True
+        elif fnmatch.fnmatch(rel_posix, pattern) or fnmatch.fnmatch(name, pattern):
             return True
     return False
 

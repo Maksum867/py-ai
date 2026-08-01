@@ -189,7 +189,7 @@ Files that exist in the project but were not packed (binaries, oversized files, 
 - **Binary extensions**: compiled artifacts, archives, images, audio/video, fonts, databases, office documents, ML artifacts (`.pkl`, `.npy`, `.onnx`, …) and executables (`.exe`, `.msi`, `.bin`, `.dll`, `.so`, …). Files of any other type that contain NUL bytes are treated as binary too and skipped with a warning.
 - **Hidden files** (starting with `.`) are ignored, **except**: `.gitignore`, `.gitattributes`, `.gitmodules`, `.env.example`, `.env.template`, `.pylintrc`, `.flake8`, `.coveragerc`, `.dockerignore`, `.editorconfig`, `.pre-commit-config.yaml`, `.python-version`, `.readthedocs.yaml`, `.readthedocs.yml`, `.codecov.yml`.
 - **`.gitignore` / `.pyaiignore` rules** (when `py-for-ai[gitignore]` is installed; disable with `--no-gitignore`).
-- **User patterns** from `--exclude` (matched against the relative POSIX path and the file name).
+- **User patterns** from `--exclude` (matched against the relative POSIX path and the file name). Git-style directory patterns work too: `--exclude 'build/'` excludes the `build/` directory and everything under it. Note: patterns use Python's `fnmatch`, where `*` also matches across `/` (so `docs/*` excludes `docs/deep/file.py` as well).
 - **Oversized files** when `--max-file-size` is given.
 - **Symlinks resolving outside the project root** and **directory symlinks** are never followed or packed (shown in the tree with a note).
 - The **output file itself** is never included in its own pack.
@@ -205,7 +205,7 @@ Files that exist in the project but were not packed (binaries, oversized files, 
 
 ## 🛠️ Requirements & Dependencies
 
-- Python `3.8` or higher (verified in CI on 3.8–3.13, Linux/Windows/macOS).
+- Python `3.8` or higher (verified in CI on 3.8–3.14, Linux/Windows/macOS).
 - `pyperclip` (for clipboard operations; requires `xclip`/`xsel` on X11 or `wl-clipboard` on Wayland for Linux desktops — otherwise a warning is shown and the output file is still produced).
 
 ---
@@ -219,4 +219,4 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Please make sure `pytest` passes (53 tests) and add tests for new features.
+Please make sure the whole `pytest` suite passes and add tests for new features.

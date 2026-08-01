@@ -193,3 +193,79 @@ def test_write_failure_raises_ioerror(sample_project, tmp_path):
     # Parent path component is a regular file -> mkdir/open must fail.
     with pytest.raises(IOError):
         pack_project(sample_project, blocker / "o.txt", copy_to_clipboard=False)
+
+
+def test_file_size_reports_real_disk_bytes(sample_project, tmp_path):
+    """'file_size' must be the on-disk byte count, not the character count
+    (len() understates non-ASCII content, e.g. Cyrillic in UTF-8)."""
+    root = tmp_path / "cyr"
+    root.mkdir()
+    (root / "ukr.txt").write_text("Привіт, світе!\n" * 100, encoding="utf-8")
+
+    out = tmp_path / "pack.txt"
+    stats = pack_project(root, out, copy_to_clipboard=False)
+    assert stats["file_size"] == out.stat().st_size
+    assert stats["file_size"] > len(out.read_text(encoding="utf-8"))  # bytes > chars
+
+
+def test_leftover_default_output_name_is_never_packed(tmp_path):
+    """A leftover 'ai_context.txt' from a previous run must not be packed
+    even when the new run writes to a differently-named output file."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "app.py").write_text("x=1", encoding="utf-8")
+    (root / "ai_context.txt").write_text("OLD PACK CONTENT", encoding="utf-8")
+
+    out = tmp_path / "fresh.txt"
+    pack_project(root, out, copy_to_clipboard=False)
+    text = out.read_text(encoding="utf-8")
+
+    assert "START OF FILE: app.py" in text
+    assert "ai_context.txt" not in text.split("FILES CONTENT")[1]
+
+
+def test_nested_file_with_default_output_name_is_packed(tmp_path):
+    """Only the ROOT-level default output name ('ai_context.txt') is treated
+    as a leftover pack; a legit nested file with the same name must be packed."""
+    root = tmp_path / "proj"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "ai_context.txt").write_text("LEGIT DOC", encoding="utf-8")
+    (root / "app.py").write_text("x=1", encoding="utf-8")
+
+    out = tmp_path / "fresh.txt"
+    pack_project(root, out, copy_to_clipboard=False)
+    content_section = out.read_text(encoding="utf-8").split("FILES CONTENT")[1]
+
+    assert "--- START OF FILE: docs/ai_context.txt ---" in content_section
+    assert "--- START OF FILE: app.py ---" in content_section
+
+
+def test_collect_files_survives_zero_inodes(tmp_path, monkeypatch):
+    """On filesystems where st_ino is 0/unreliable, directories must not be
+    silently treated as duplicates (which used to drop whole subtrees)."""
+    import os
+
+    import py_ai.core as core
+
+    root = tmp_path / "proj"
+    (root / "dir1").mkdir(parents=True)
+    (root / "dir2").mkdir(parents=True)
+    (root / "dir1" / "a.py").write_text("a", encoding="utf-8")
+    (root / "dir2" / "b.py").write_text("b", encoding="utf-8")
+    (root / "c.py").write_text("c", encoding="utf-8")
+
+    real_stat = os.stat
+
+    def zero_ino_stat(path, *args, **kwargs):
+        st = real_stat(path, *args, **kwargs)
+        return os.stat_result((
+            st.st_mode, 0, st.st_dev, st.st_nlink, st.st_uid, st.st_gid,
+            st.st_size, st.st_atime, st.st_mtime, st.st_ctime,
+        ))
+
+    monkeypatch.setattr(os, "stat", zero_ino_stat)
+    files = core._collect_files(root, root / "out.txt", core.make_filter(root))
+
+    # as_posix() normalizes separators so the assertion works on Windows too.
+    rels = sorted(f.relative_to(root).as_posix() for f in files)
+    assert rels == ["c.py", "dir1/a.py", "dir2/b.py"]

@@ -5,9 +5,13 @@ function Ok($m)  { $script:pass++; Write-Host "  [PASS] $m" -ForegroundColor Gre
 function Bad($m) { $script:fail++; Write-Host "  [FAIL] $m" -ForegroundColor Red }
 function Skip($m){ Write-Host "  [SKIP] $m" -ForegroundColor Yellow }
 
+# Single source of truth for the version: pyproject.toml (avoids drift).
+$version = (Select-String -Path "pyproject.toml" -Pattern '^version = "([^"]+)"').Matches.Groups[1].Value
+if (-not $version) { Write-Host "Cannot read version from pyproject.toml" -ForegroundColor Red; exit 1 }
+
 Write-Host "== 1. Entry points ==" -ForegroundColor Cyan
 $ver = (pyai --version 2>&1 | Out-String).Trim()
-if ($ver -match "pyai 0\.2\.0") { Ok "--version -> $ver" } else { Bad "--version -> '$ver'" }
+if ($ver -match "pyai $([regex]::Escape($version))") { Ok "--version -> $ver" } else { Bad "--version -> '$ver'" }
 py-ai --help 2>&1 | Out-Null;  if ($LASTEXITCODE -eq 0) { Ok "py-ai alias" } else { Bad "py-ai alias" }
 python -m py_ai --help 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { Ok "python -m py_ai" } else { Bad "python -m py_ai" }
 pip check 2>&1 | Out-Null;     if ($LASTEXITCODE -eq 0) { Ok "pip check" } else { Bad "pip check" }
@@ -70,7 +74,7 @@ python -m venv $wv 2>&1 | Out-Null
 $whl = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
 & "$wv\Scripts\pip.exe" install -q $whl 2>&1 | Out-Null
 $wvVer = (& "$wv\Scripts\pyai.exe" --version 2>&1 | Out-String).Trim()
-if ($wvVer -match "0\.2\.0") { Ok "wheel smoke in fresh venv -> $wvVer" } else { Bad "wheel smoke: '$wvVer'" }
+if ($wvVer -match $([regex]::Escape($version))) { Ok "wheel smoke in fresh venv -> $wvVer" } else { Bad "wheel smoke: '$wvVer'" }
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan

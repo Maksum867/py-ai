@@ -6,6 +6,7 @@ Provides user interaction, argument parsing, and triggers the packing logic.
 """
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -32,7 +33,24 @@ def parse_size(value: str) -> int:
         raise ValueError(f"invalid size value: '{value}' (examples: 512KB, 10MB, 1048576)")
     number = float(match.group(1))
     suffix = (match.group(2) or "B").upper()
-    return int(number * _SIZE_SUFFIXES[suffix])
+    result = int(number * _SIZE_SUFFIXES[suffix])
+    if result <= 0:
+        raise ValueError(f"size must be greater than zero: '{value}'")
+    return result
+
+
+def _program_name() -> str:
+    """Returns the program name to display, based on how the tool was invoked.
+
+    Both console scripts ('pyai' and 'py-ai') point to the same entry point,
+    so the name must be derived from argv[0] instead of being hardcoded.
+    """
+    argv0 = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0.startswith("py-ai"):
+        return "py-ai"
+    if argv0.startswith("pyai"):
+        return "pyai"
+    return "pyai"
 
 def _enable_unicode_output() -> None:
     """Prevent crashes when stdout/stderr are attached to pipes that use
@@ -47,7 +65,7 @@ def _enable_unicode_output() -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="pyai",
+        prog=_program_name(),
         description="py-ai: pack your project's codebase into a single text (or Markdown) file "
                     "and copy it to the clipboard for LLM context."
     )
@@ -134,7 +152,11 @@ def main():
             print(f"❌ Error: {e}", file=sys.stderr)
             sys.exit(2)
 
-    print(f"🔍 Scanning project directory: {root_path.resolve()}")
+    try:
+        resolved_root = root_path.resolve()
+    except OSError:
+        resolved_root = root_path.absolute()
+    print(f"🔍 Scanning project directory: {resolved_root}")
 
     try:
         # Trigger the core packing logic
