@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "py-for-ai"
-version = "0.2.0"
+version = "0.3.0"
 description = "A command-line utility to pack Python codebases into a single text file for AI context, with clipboard support."
 readme = "README.md"
 requires-python = ">=3.8"

@@ -43,7 +43,7 @@ def looks_binary(raw: bytes, check_bytes: int = BINARY_CHECK_BYTES) -> bool:
     return b"\x00" in raw[:check_bytes]
 
 
-def read_text_content(file_path: Path) -> tuple[str | None, str | None]:
+def read_text_content(file_path: Path) -> tuple[str | None, str | None, str | None]:
     """
     Reads a file and returns its text content, handling encodings gracefully.
 
@@ -54,29 +54,31 @@ def read_text_content(file_path: Path) -> tuple[str | None, str | None]:
        UTF-8 -> UTF-8-SIG -> cp1251 -> latin-1 (the latter never fails).
 
     :param file_path: Path to the file to read.
-    :return: Tuple (content, None) on success or (None, reason) on failure.
+    :return: Tuple (content, error_reason, encoding) where encoding is the
+             codec that was actually used (None on failure). Callers can use
+             it to warn when a non-UTF-8 file was transcoded.
     """
     try:
         raw = Path(file_path).read_bytes()
     except PermissionError:
-        return None, "permission denied"
+        return None, "permission denied", None
     except OSError as e:
-        return None, f"read error: {e}"
+        return None, f"read error: {e}", None
 
     for bom, encoding in _BOM_ENCODINGS:
         if raw.startswith(bom):
             try:
-                return raw.decode(encoding), None
+                return raw.decode(encoding), None, encoding
             except UnicodeDecodeError:
-                return None, "encoding error (invalid BOM-marked content)"
+                return None, "encoding error (invalid BOM-marked content)", None
 
     if looks_binary(raw):
-        return None, "binary file"
+        return None, "binary file", None
 
     for encoding in ENCODING_FALLBACK_CHAIN:
         try:
-            return raw.decode(encoding), None
+            return raw.decode(encoding), None, encoding
         except UnicodeDecodeError:
             continue
 
-    return None, "encoding error"
+    return None, "encoding error", None

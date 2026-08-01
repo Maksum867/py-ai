@@ -135,6 +135,26 @@ Pop-Location
 $out3 = Get-Content (Join-Path $demo "ctx3.txt") -Raw
 Check ($out3 -like "*START OF FILE: debug.log*")              "--no-gitignore re-packs *.log"
 
+# new feature flags (group 1)
+Push-Location $demo
+python -m py_ai . --no-clipboard --no-tree -o ctx4.txt 2>&1 | Out-Null
+Pop-Location
+$out4 = Get-Content (Join-Path $demo "ctx4.txt") -Raw
+Check ($out4 -notlike "*DIRECTORY TREE*")                     "--no-tree omits the tree section"
+Check ($out4 -like "*START OF FILE: app.py ---*")             "  ...but content still packed"
+
+Push-Location $demo
+python -m py_ai . --no-clipboard --no-token-count -o ctx5.txt 2>&1 | Out-Null
+Pop-Location
+$out5 = Get-Content (Join-Path $demo "ctx5.txt") -Raw
+Check ($out5 -like "*Estimated tokens: disabled*")            "--no-token-count disables estimation"
+
+Push-Location $demo
+$quietOut = (python -m py_ai . --no-clipboard --quiet -o ctx6.txt 2>&1 | Out-String).Trim()
+Pop-Location
+Check ($quietOut -eq "")                                      "--quiet prints nothing on stdout"
+Check (Test-Path (Join-Path $demo "ctx6.txt"))                "  ...but still writes the output file"
+
 # exit codes
 Push-Location $demo
 python -m py_ai C:\nonexistent_dir_xyz 2>&1 | Out-Null; $e1 = $LASTEXITCODE

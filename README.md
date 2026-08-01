@@ -21,6 +21,7 @@ Perfect for instantly feeding your codebase context into Large Language Models (
 - **Smart Filtering**: automatically ignores VCS folders (`.git`, `.github`), virtual environments (`.venv`, `venv`), IDE settings (`.vscode`, `.idea`), build artifacts (`dist`, `build`, `*.egg-info`), caches (`__pycache__`, `.pytest_cache`), binary files (images, archives, databases, executables — plus a NUL-byte content heuristic) and hidden files (except explicitly allowed configs like `.gitignore`, `.env.example`, `.editorconfig`, `.dockerignore`).
 - **`.gitignore` / `.pyaiignore` support**: honored automatically when the optional `pathspec` dependency is installed (`pip install py-for-ai[gitignore]`).
 - **Custom exclusions**: additional glob patterns via `--exclude` (repeatable) and a per-file size cap via `--max-file-size`.
+- **Output control**: `--quiet`/`-q` for CI-friendly silent runs (errors still go to stderr), `--verbose`/`-v` for extra details, `--no-tree` to drop the directory tree section, and `--no-token-count` to skip token estimation on large projects.
 - **Symlink-Safe**: symlinks pointing **outside** the project root are never followed or packed; directory symlinks are never traversed, so cycles and aliased duplicates are impossible. Suspicious links stay visible in the directory tree with an explanatory note.
 - **Deep-Project-Proof**: iterative (stack-based) directory traversal — no `RecursionError` on very deeply nested projects.
 - **Encoding-Aware**: reads UTF-8, UTF-8-BOM, UTF-16/32 (via BOM), legacy Cyrillic `cp1251` and other 8-bit encodings automatically; true binary files are skipped with a clear warning and marked in the tree.
@@ -78,6 +79,17 @@ pip install -e ".[dev]"
 pytest
 ```
 
+### Full pre-release verification (one command)
+
+Run everything — tests, lint, CLI smoke checks, git hygiene, build, wheel smoke — from the repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File verify_all.ps1     # full check
+.\verify_all.ps1 -SkipBuild                                  # quick check (no build)
+```
+
+The script exits `0` when every check passes and `1` when anything fails.
+
 ### Usage
 
 Run the utility from any terminal session — both `pyai` and the `py-ai` alias are available:
@@ -104,6 +116,13 @@ pyai --max-file-size 200KB --exclude '*.log' --exclude 'docs/*'
 # 7. Same via the alias or as a module; show the installed version:
 py-ai --no-clipboard
 python -m py_ai --version
+
+# 8. CI-friendly: no informational output, no clipboard, no tree:
+pyai --quiet --no-clipboard --no-tree -o context.txt
+
+# 9. Skip token estimation (faster on big repos) or show extra details:
+pyai --no-token-count
+pyai --verbose
 ```
 
 ---

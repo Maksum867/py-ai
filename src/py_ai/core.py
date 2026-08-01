@@ -317,7 +317,8 @@ def _collect_files(root_path: Path, output_path: Path, ignore_predicate) -> list
 
 def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboard: bool = True,
                  *, max_file_size: int | None = None, output_format: str = "text",
-                 exclude_patterns=None, respect_gitignore: bool = True) -> dict:
+                 exclude_patterns=None, respect_gitignore: bool = True,
+                 include_tree: bool = True, enable_token_count: bool = True) -> dict:
     """
     Recursively scans the project, builds an ASCII tree, gathers all text file
     contents, saves the aggregated output to a single file and (optionally)
@@ -333,6 +334,9 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
                              matched against the relative POSIX path and the file name.
     :param respect_gitignore: Honor .pyaiignore/.gitignore files when the
                               optional 'pathspec' dependency is installed.
+    :param include_tree: When False, the directory tree is omitted from the output.
+    :param enable_token_count: When False, token estimation is skipped (faster
+                               on large projects); token_method becomes 'disabled'.
     :return: Dictionary with execution statistics (file counts, size, lines,
              estimated tokens, clipboard status, ...).
     """
@@ -378,13 +382,18 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
                 skipped_files[file_path] = f"exceeds size limit ({_format_bytes(max_file_size)})"
                 continue
 
-        content, error_reason = read_text_content(file_path)
+        content, error_reason, encoding = read_text_content(file_path)
 
         if content is None:
             # Unreadable/undecodable/binary files are skipped gracefully.
             print(f"Warning: Skipped '{rel_path}' ({error_reason}).", file=sys.stderr)
             skipped_files[file_path] = error_reason
             continue
+
+        # Be transparent about transcoding: a non-UTF-8 source file is
+        # converted to UTF-8 in the pack, which may surprise the user.
+        if encoding is not None and not encoding.startswith("utf-8"):
+            print(f"Note: '{rel_path}' was read as {encoding} and transcoded to UTF-8.", file=sys.stderr)
 
         total_source_lines += count_lines(content)
         content_blocks.append(format_file_block(rel_path, content, output_format))
@@ -394,15 +403,17 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
 
     # 3. Generate the ASCII directory tree (AFTER reading files, so entries
     #    that failed to read can be visibly marked).
-    tree_lines = build_tree_lines(
-        root_path,
-        root_path,
-        is_root=True,
-        exclude_path=output_path,
-        skipped_files=skipped_files,
-        ignore_predicate=ignore_predicate,
-    )
-    tree_text = "\n".join(tree_lines)
+    tree_text = ""
+    if include_tree:
+        tree_lines = build_tree_lines(
+            root_path,
+            root_path,
+            is_root=True,
+            exclude_path=output_path,
+            skipped_files=skipped_files,
+            ignore_predicate=ignore_predicate,
+        )
+        tree_text = "\n".join(tree_lines)
 
     # 4. Assemble the complete output document and compute statistics.
     #    Token statistics are computed over the final document, so they
@@ -417,15 +428,20 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         "token_method": "",
     }
 
-    full_output = assemble_output(stats, tree_text, content_blocks, output_format)
+    full_output = assemble_output(stats, tree_text, content_blocks, output_format,
+                                  include_tree=include_tree)
 
     stats["total_lines"] = count_lines(full_output)
-    estimated_tokens, token_method = count_tokens(full_output)
+    if enable_token_count:
+        estimated_tokens, token_method = count_tokens(full_output)
+    else:
+        estimated_tokens, token_method = 0, "disabled"
     stats["estimated_tokens"] = estimated_tokens
     stats["token_method"] = token_method
 
     # Re-assemble once with the final statistics embedded in the header.
-    full_output = assemble_output(stats, tree_text, content_blocks, output_format)
+    full_output = assemble_output(stats, tree_text, content_blocks, output_format,
+                                  include_tree=include_tree)
 
     # 5. Write to the output file
     try:
@@ -468,6 +484,7 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         "estimated_tokens": estimated_tokens,
         "token_method": token_method,
         "output_format": output_format,
+        "include_tree": include_tree,
     }
 
 

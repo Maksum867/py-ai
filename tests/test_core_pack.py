@@ -242,6 +242,28 @@ def test_nested_file_with_default_output_name_is_packed(tmp_path):
     assert "--- START OF FILE: app.py ---" in content_section
 
 
+def test_include_tree_false_omits_tree(sample_project, tmp_path):
+    """include_tree=False removes the tree section but keeps file content."""
+    out = tmp_path / "pack.txt"
+    stats = pack_project(sample_project, out, copy_to_clipboard=False, include_tree=False)
+    text = out.read_text(encoding="utf-8")
+
+    assert "DIRECTORY TREE" not in text
+    assert "--- START OF FILE: src/main.py ---" in text
+    assert stats["include_tree"] is False
+
+
+def test_no_token_count_disables_estimation(sample_project, tmp_path):
+    out = tmp_path / "pack.txt"
+    stats = pack_project(sample_project, out, copy_to_clipboard=False,
+                         enable_token_count=False)
+    text = out.read_text(encoding="utf-8")
+
+    assert stats["token_method"] == "disabled"
+    assert stats["estimated_tokens"] == 0
+    assert "Estimated tokens: disabled" in text
+
+
 def test_collect_files_survives_zero_inodes(tmp_path, monkeypatch):
     """On filesystems where st_ino is 0/unreliable, directories must not be
     silently treated as duplicates (which used to drop whole subtrees)."""

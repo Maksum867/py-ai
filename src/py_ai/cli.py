@@ -123,6 +123,32 @@ def _build_parser() -> argparse.ArgumentParser:
              "'pathspec' dependency (py-for-ai[gitignore]) is installed."
     )
 
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Suppress informational output (scan banner, summary, clipboard "
+             "status). Errors and warnings are still shown on stderr."
+    )
+    verbosity.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Print extra details in the summary (e.g. total source lines)."
+    )
+
+    parser.add_argument(
+        "--no-tree",
+        action="store_true",
+        help="Omit the directory tree section from the output (both formats)."
+    )
+
+    parser.add_argument(
+        "--no-token-count",
+        action="store_true",
+        help="Skip token estimation (faster on large projects); the header "
+             "then reports 'Estimated tokens: disabled'."
+    )
+
     parser.add_argument(
         "--version",
         action="version",
@@ -152,11 +178,12 @@ def main():
             print(f"❌ Error: {e}", file=sys.stderr)
             sys.exit(2)
 
-    try:
-        resolved_root = root_path.resolve()
-    except OSError:
-        resolved_root = root_path.absolute()
-    print(f"🔍 Scanning project directory: {resolved_root}")
+    if not args.quiet:
+        try:
+            resolved_root = root_path.resolve()
+        except OSError:
+            resolved_root = root_path.absolute()
+        print(f"🔍 Scanning project directory: {resolved_root}")
 
     try:
         # Trigger the core packing logic
@@ -168,31 +195,39 @@ def main():
             output_format=args.output_format,
             exclude_patterns=args.exclude,
             respect_gitignore=not args.no_gitignore,
+            include_tree=not args.no_tree,
+            enable_token_count=not args.no_token_count,
         )
 
-        print("\n✨ Project successfully packed!")
-        print(f"📁 Root Directory:   {stats['root_dir']}")
-        print(f"📄 Output File:      {stats['output_file']}")
-        print(f"🧾 Output Format:    {stats['output_format']}")
-        print(f"💾 Output Size:      {_format_bytes(stats.get('file_size', 0))}")
-        print(f"📦 Packed Files:     {stats['packed_count']}")
-        print(f"📏 Total Lines:      {stats['total_lines']}")
-        print(f"🪙 Estimated Tokens: ~{stats['estimated_tokens']} ({stats['token_method']})")
-
-        if stats['failed_count'] > 0:
-            print(f"⚠️  Skipped Files:    {stats['failed_count']} (see warning messages above; they are marked '[skipped: ...]' in the directory tree)")
-
-        if stats['clipboard_copied']:
-            print("📋 Project context copied to clipboard successfully!")
-        else:
-            if args.no_clipboard:
-                print("ℹ️  Clipboard copying was disabled by the --no-clipboard flag.")
+        if not args.quiet:
+            print("\n✨ Project successfully packed!")
+            print(f"📁 Root Directory:   {stats['root_dir']}")
+            print(f"📄 Output File:      {stats['output_file']}")
+            print(f"🧾 Output Format:    {stats['output_format']}")
+            print(f"💾 Output Size:      {_format_bytes(stats.get('file_size', 0))}")
+            print(f"📦 Packed Files:     {stats['packed_count']}")
+            print(f"📏 Total Lines:      {stats['total_lines']}")
+            if args.verbose:
+                print(f"📄 Source Lines:     {stats['total_source_lines']}")
+            if stats['token_method'] == "disabled":
+                print("🪙 Estimated Tokens: disabled")
             else:
-                print(
-                    f"⚠️  Could not copy to clipboard.\n"
-                    f"   Details: {stats['clipboard_error'] or 'Unknown error'}.\n"
-                    f"   The output was still saved successfully to the output file."
-                )
+                print(f"🪙 Estimated Tokens: ~{stats['estimated_tokens']} ({stats['token_method']})")
+
+            if stats['failed_count'] > 0:
+                print(f"⚠️  Skipped Files:    {stats['failed_count']} (see warning messages above; they are marked '[skipped: ...]' in the directory tree)")
+
+            if stats['clipboard_copied']:
+                print("📋 Project context copied to clipboard successfully!")
+            else:
+                if args.no_clipboard:
+                    print("ℹ️  Clipboard copying was disabled by the --no-clipboard flag.")
+                else:
+                    print(
+                        f"⚠️  Could not copy to clipboard.\n"
+                        f"   Details: {stats['clipboard_error'] or 'Unknown error'}.\n"
+                        f"   The output was still saved successfully to the output file."
+                    )
 
     except FileNotFoundError as e:
         print(f"❌ Error: {e}", file=sys.stderr)

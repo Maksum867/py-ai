@@ -87,7 +87,10 @@ def format_stats_lines(stats: dict) -> list[str]:
     if stats["failed_count"] > 0:
         lines.append(f"Skipped files: {stats['failed_count']} (marked in the tree / see warnings)")
     lines.append(f"Total lines: {stats['total_lines']}")
-    lines.append(f"Estimated tokens: ~{stats['estimated_tokens']} ({stats['token_method']})")
+    if stats.get("token_method") == "disabled":
+        lines.append("Estimated tokens: disabled")
+    else:
+        lines.append(f"Estimated tokens: ~{stats['estimated_tokens']} ({stats['token_method']})")
     return lines
 
 
@@ -111,7 +114,7 @@ def format_file_block(rel_path: str, content: str, output_format: str = "text") 
 
 
 def assemble_output(stats: dict, tree_text: str, content_blocks: list[str],
-                    output_format: str = "text") -> str:
+                    output_format: str = "text", include_tree: bool = True) -> str:
     """
     Assembles the complete output document.
 
@@ -119,21 +122,26 @@ def assemble_output(stats: dict, tree_text: str, content_blocks: list[str],
     :param tree_text: Rendered ASCII directory tree.
     :param content_blocks: Pre-formatted per-file blocks.
     :param output_format: 'text' or 'markdown'.
+    :param include_tree: When False, the directory tree section is omitted.
     :return: The full output text.
     """
     stats_lines = format_stats_lines(stats)
 
     if output_format == "markdown":
-        tree_fence = _adaptive_fence(tree_text)
         header = "# Project Context Pack\n" + "\n".join(f"- {line}" for line in stats_lines)
-        tree_section = f"## Directory Tree\n\n{tree_fence}text\n{tree_text}\n{tree_fence}"
         files_section = "## Files Content"
-        return f"{header}\n\n{tree_section}\n\n{files_section}\n\n" + "\n\n".join(content_blocks) + "\n"
+        if include_tree:
+            tree_fence = _adaptive_fence(tree_text)
+            tree_section = f"## Directory Tree\n\n{tree_fence}text\n{tree_text}\n{tree_fence}"
+            return f"{header}\n\n{tree_section}\n\n{files_section}\n\n" + "\n\n".join(content_blocks) + "\n"
+        return f"{header}\n\n{files_section}\n\n" + "\n\n".join(content_blocks) + "\n"
 
     header = f"{SEPARATOR}\n" + "\n".join(_header_text_lines(stats_lines)) + f"\n{SEPARATOR}\n"
-    tree_section = f"{SEPARATOR}\nDIRECTORY TREE\n{SEPARATOR}\n{tree_text}\n"
     files_section_header = f"{SEPARATOR}\nFILES CONTENT\n{SEPARATOR}\n"
-    return f"{header}\n{tree_section}\n{files_section_header}\n" + "\n\n".join(content_blocks) + "\n"
+    if include_tree:
+        tree_section = f"{SEPARATOR}\nDIRECTORY TREE\n{SEPARATOR}\n{tree_text}\n"
+        return f"{header}\n{tree_section}\n{files_section_header}\n" + "\n\n".join(content_blocks) + "\n"
+    return f"{header}\n{files_section_header}\n" + "\n\n".join(content_blocks) + "\n"
 
 
 def _header_text_lines(stats_lines: list[str]) -> list[str]:

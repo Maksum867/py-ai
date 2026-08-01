@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+- **`--quiet` / `-q` and `--verbose` / `-v`** (`cli.py`): suppress all
+  informational output (scan banner, summary, clipboard status) for CI, or
+  print extra details (e.g. total source lines). Errors and warnings still go
+  to stderr. The flags are mutually exclusive.
+- **`--no-tree`** (`cli.py`, `core.py`, `formatting.py`): omit the directory
+  tree section from both output formats.
+- **`--no-token-count`** (`cli.py`, `core.py`): skip token estimation for
+  large projects; the header then shows `Estimated tokens: disabled`.
+- **Transcoding transparency** (`readers.py`, `core.py`): the reader now
+  reports which codec was actually used, and the packer prints a note when a
+  non-UTF-8 file (cp1251, latin-1, UTF-16/32) is transcoded to UTF-8.
+
 ### Fixed
 - **`--exclude 'dir/'` also matched a same-named regular file** (`filters.py`):
   a git-style directory pattern now matches only the directory itself (or

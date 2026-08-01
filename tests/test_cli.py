@@ -85,6 +85,54 @@ def test_invalid_format_exits_2(sample_project, monkeypatch):
     assert exc.value.code == 2  # argparse choices error
 
 
+def test_quiet_suppresses_info_but_not_output(sample_project, tmp_path, monkeypatch, capsys):
+    out = tmp_path / "ctx.txt"
+    _run_cli(["pyai", str(sample_project), "-o", str(out), "--no-clipboard", "--quiet"],
+             monkeypatch)
+    captured = capsys.readouterr()
+
+    assert captured.out.strip() == ""          # no banner, no summary
+    assert out.is_file()                        # output file still written
+
+
+def test_no_tree_omits_tree(sample_project, tmp_path, monkeypatch, capsys):
+    out = tmp_path / "ctx.txt"
+    _run_cli(["pyai", str(sample_project), "-o", str(out), "--no-clipboard", "--no-tree"],
+             monkeypatch)
+    captured = capsys.readouterr()
+    text = out.read_text(encoding="utf-8")
+
+    assert "DIRECTORY TREE" not in text
+    assert "--- START OF FILE: src/main.py ---" in text
+    assert "Project successfully packed!" in captured.out
+
+
+def test_no_token_count_cli(sample_project, tmp_path, monkeypatch, capsys):
+    out = tmp_path / "ctx.txt"
+    _run_cli(["pyai", str(sample_project), "-o", str(out), "--no-clipboard", "--no-token-count"],
+             monkeypatch)
+    captured = capsys.readouterr()
+
+    assert "Estimated Tokens: disabled" in captured.out
+    assert "Estimated tokens: disabled" in out.read_text(encoding="utf-8")
+
+
+def test_verbose_shows_source_lines(sample_project, tmp_path, monkeypatch, capsys):
+    out = tmp_path / "ctx.txt"
+    _run_cli(["pyai", str(sample_project), "-o", str(out), "--no-clipboard", "--verbose"],
+             monkeypatch)
+    captured = capsys.readouterr()
+
+    assert "Source Lines:" in captured.out
+
+
+def test_quiet_and_verbose_conflict(sample_project, tmp_path, monkeypatch):
+    with pytest.raises(SystemExit) as exc:
+        _run_cli(["pyai", str(sample_project), "--no-clipboard", "--quiet", "--verbose"],
+                 monkeypatch)
+    assert exc.value.code == 2  # argparse mutually-exclusive group
+
+
 def test_clipboard_failure_warns_exactly_once(sample_project, tmp_path, monkeypatch, capsys):
     def _boom(_text):
         raise pyperclip.PyperclipException("no clipboard here")
