@@ -7,24 +7,6 @@ import pytest
 from py_ai.core import pack_project
 
 
-def _iterative_rmtree(path):
-    """Removes a directory tree WITHOUT recursion: on Python <= 3.11 both
-    shutil.rmtree and pytest's garbage collection recurse per level and
-    crash (RecursionError) on very deep trees created by this test."""
-    dirs = []
-    stack = [path]
-    while stack:
-        current = stack.pop()
-        dirs.append(current)
-        for child in current.iterdir():
-            if child.is_dir() and not child.is_symlink():
-                stack.append(child)
-            else:
-                child.unlink()
-    for directory in reversed(dirs):
-        directory.rmdir()
-
-
 def test_deeply_nested_project(tmp_path):
     """~1100 levels of nesting must not hit the recursion limit."""
     current = tmp_path / "deep"
@@ -39,11 +21,6 @@ def test_deeply_nested_project(tmp_path):
     assert stats["packed_count"] == 1
     text = out.read_text(encoding="utf-8")
     assert "leaf.py" in text
-
-    # Self-cleanup (iterative): pytest's own recursive tmp-dir garbage
-    # collection would crash on Python <= 3.11 otherwise.
-    _iterative_rmtree(tmp_path / "deep")
-    assert not (tmp_path / "deep").exists()
 
 
 @pytest.mark.skipif(

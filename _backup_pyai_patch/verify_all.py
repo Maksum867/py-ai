@@ -325,7 +325,7 @@ def main() -> int:
     print(f" Summary: {_pass} passed, {_fail} failed")
     print("===============================================")
     if _fail == 0 and not args.skip_build:
-        print(" Ready to publish: python -m build && python -m twine upload dist/*")
+        print(" Ready to work")
     return 1 if _fail else 0
 
 

@@ -36,12 +36,6 @@
 ## [0.3.1] - 2026-09-13
 
 ### Fixed
-- **RecursionError on deeply nested projects on Python <= 3.11** (`core.py`,
-  `filters.py` — caught by the new CI matrix, which is exactly what it exists
-  for): `Path.resolve()` (recursive `realpath` before Python 3.12) and
-  `os.walk` (recursive before Python 3.12) both crashed on ~1100-level trees.
-  Path comparison for non-symlink entries now uses iterative `abspath`, and
-  ignore-file discovery uses an explicit stack. Python 3.8-3.14 verified.
 - **CRLF line endings leaked into the pack on Windows** (`readers.py`): source
   files created on Windows carry `\r\n`, which was packed as-is — extra CR
   noise (and tokens) for the LLM and platform-dependent statistics. Content is
@@ -103,9 +97,7 @@
 - **21 new regression tests**: nested-gitignore depth/anchoring/negation,
   symlink alias dedup, dangling-link note, token-stat fixed point, tree
   pruning, NUL-tail detection, newline normalization, language detection,
-  program name. The deep-nesting test now cleans up after itself
-  iteratively, so pytest's own recursive tmp-dir garbage collection cannot
-  crash on Python <= 3.11.
+  program name.
 
 ### Notes (documented behaviour, unchanged by design)
 - UTF-16/32 files WITHOUT a BOM contain NUL bytes and are skipped as binary.

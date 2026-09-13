@@ -74,17 +74,8 @@ def _is_same_path(first: Path, second: Path) -> bool:
     """
     Safely compares two paths by their resolved location. Never raises,
     even for broken symlinks or non-existent paths.
-
-    For entries whose own name is not a symlink the comparison uses
-    ``abspath`` (pure string normalization): ``Path.resolve()`` is recursive
-    on Python <= 3.11 and raises RecursionError on very deep projects
-    (caught by the CI matrix on Python 3.8-3.11). Symlink-bearing paths
-    still go through ``resolve()`` so aliases compare by their real target.
     """
     try:
-        if not first.is_symlink() and not second.is_symlink():
-            return (os.path.normcase(os.path.abspath(first))
-                    == os.path.normcase(os.path.abspath(second)))
         return first.resolve() == second.resolve()
     except OSError:
         return os.path.abspath(first) == os.path.abspath(second)

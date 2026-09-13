@@ -191,9 +191,6 @@ def _find_ignore_files(root_dir: Path) -> list[tuple[Path, str]]:
     """
     Collects every '.pyaiignore' / '.gitignore' file inside the project.
 
-    The traversal is iterative (explicit stack), so arbitrarily deep
-    projects do not raise RecursionError on Python <= 3.11.
-
     :param root_dir: Root directory of the project.
     :return: List of ``(base_dir, file_name)`` pairs, ordered so that rules
              applied later win (git semantics): root files first, then deeper
@@ -201,36 +198,16 @@ def _find_ignore_files(root_dir: Path) -> list[tuple[Path, str]]:
              after '.gitignore' so it can override it.
     """
     found: list[tuple[Path, str]] = []
-    # ITERATIVE traversal (explicit stack): os.walk recurses per directory
-    # level, which hits RecursionError on very deep projects on Python
-    # <= 3.11 (caught by the CI matrix). Symlinked directories are not
-    # descended into (os.walk default), ignored subtrees are pruned.
-    stack: list[Path] = [root_dir]
-    while stack:
-        base = stack.pop()
-        try:
-            entries = list(os.scandir(base))
-        except OSError:
-            continue  # unreadable directory: no ignore files inside
-        dirnames: list[str] = []
-        filenames: list[str] = []
-        for entry in entries:
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    dirnames.append(entry.name)
-                else:
-                    filenames.append(entry.name)
-            except OSError:
-                continue  # vanished or unreadable entry: skip it
-        dirnames = [
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        # Never descend into ignored directory subtrees (perf + correctness).
+        dirnames[:] = [
             d for d in dirnames
             if d.lower() not in IGNORED_NAMES and not d.lower().endswith(".egg-info")
         ]
+        base = Path(dirpath)
         for name in IGNORE_FILE_NAMES:
             if name in filenames:
                 found.append((base, name))
-        for d in dirnames:
-            stack.append(base / d)
 
     def _key(item: tuple[Path, str]) -> tuple:
         depth = len(item[0].relative_to(root_dir).parts)

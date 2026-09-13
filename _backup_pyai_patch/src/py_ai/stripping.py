@@ -43,12 +43,7 @@ def _collect_and_remove_docstrings(tree) -> list:
 
 def _fallback_strip(source: str, docstring_spans) -> str:
     """Python 3.8 path (no ast.unparse): blank out docstring lines and
-    comments via tokenize, then collapse runs of blank lines.
-
-    A def/class whose body consisted only of the docstring would become an
-    empty (invalid) block, so a ``pass`` statement is inserted under such
-    headers — mirroring what the AST path does on Python >= 3.9.
-    """
+    comments via tokenize, then collapse runs of blank lines."""
     out_lines = source.splitlines()
     try:
         tokens = tokenize.generate_tokens(io.StringIO(source).readline)
@@ -60,32 +55,9 @@ def _fallback_strip(source: str, docstring_spans) -> str:
     except (tokenize.TokenError, IndentationError, SyntaxError):
         return source
 
-    # Bottom-up so inserted lines never shift the pending spans.
-    for start, end in sorted(docstring_spans, reverse=True):
+    for start, end in docstring_spans:
         for line_no in range(start, min(end, len(out_lines)) + 1):
             out_lines[line_no - 1] = ""
-        # Locate the header line above the docstring (nearest non-blank).
-        header_idx = start - 2
-        while header_idx >= 0 and not out_lines[header_idx].strip():
-            header_idx -= 1
-        if header_idx < 0:
-            continue  # module docstring: an empty module is still valid
-        header = out_lines[header_idx]
-        if not header.rstrip().endswith(":"):
-            continue  # not a def/class one-liner header
-        header_indent = header[:len(header) - len(header.lstrip())]
-        # Skip the blanked block; if the next non-blank line is not deeper
-        # than the header, the block is empty and needs a `pass`.
-        after = end  # 1-based index of the first line after the docstring
-        while after <= len(out_lines) and not out_lines[after - 1].strip():
-            after += 1
-        if after > len(out_lines):
-            out_lines.insert(after - 1, header_indent + "    pass")
-            continue
-        following = out_lines[after - 1]
-        following_indent = following[:len(following) - len(following.lstrip())]
-        if len(following_indent) <= len(header_indent):
-            out_lines.insert(after - 1, header_indent + "    pass")
 
     cleaned = []
     blank = False
