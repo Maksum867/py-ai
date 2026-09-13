@@ -41,8 +41,14 @@ from py_ai.filters import (
     make_filter,
     should_ignore,
 )
-from py_ai.formatting import assemble_output, available_formats, format_file_block
+from py_ai.formatting import (
+    assemble_json_output,
+    assemble_output,
+    available_formats,
+    format_file_block,
+)
 from py_ai.readers import read_text_content
+from py_ai.stripping import strip_python_docs
 from py_ai.tokens import count_lines, count_tokens
 
 # Internal sentinel used in the tree stack for directory symlinks; the final
@@ -108,6 +114,115 @@ def _dir_identity(path: Path):
         return None
 
 
+def _file_identity(path: Path):
+    """
+    Returns a stable identity key for a file (or a file symlink), or None when
+    it cannot be determined. Used to skip symlink aliases so the same content
+    is never packed twice (mirrors the directory-symlink policy). Prefers the
+    ``(st_dev, st_ino)`` pair with a resolved-path fallback for filesystems
+    with unreliable inodes.
+    """
+    try:
+        st = path.stat()  # follows symlinks: alias == target
+    except OSError:
+        try:
+            return ("path", os.path.normcase(os.path.realpath(os.fspath(path))))
+        except OSError:
+            return None
+    if st.st_dev and st.st_ino:
+        return ("inode", st.st_dev, st.st_ino)
+    try:
+        return ("path", os.path.normcase(os.path.realpath(os.fspath(path))))
+    except OSError:
+        return None
+
+
+def _dir_has_visible_content(directory: Path, ignore_predicate, root_dir: Path,
+                            exclude_resolved: Path | None, memo: dict) -> bool:
+    """
+    True when the directory still contains at least one entry the tree would
+    show: a non-ignored file/dir, or an entry displayed with an explanatory
+    note (outside-root symlink, dangling symlink, directory symlink).
+
+    Used to prune directories whose entire content was filtered out (e.g. by
+    ``--exclude 'docs/*'``) so the tree stays consistent with the packed
+    content instead of showing empty folders.
+
+    ``memo`` caches per-directory results and MUST be shared across all calls
+    of one ``build_tree_lines`` run (filters are constant within it). Results
+    are computed bottom-up for the whole subtree on a miss, so every
+    directory is resolved exactly once per run — total O(n) even for deeply
+    nested chains. Unreadable directories are treated as visible (they render
+    an error note in the tree).
+    """
+    key = _dir_identity(directory)
+    if key is not None and key in memo:
+        return memo[key]
+
+    # Post-order traversal; each frame aggregates its children's results.
+    # frame = [dir, key_or_None, children_or_None, index, child_results]
+    stack = [[directory, key, None, 0, []]]
+    while stack:
+        frame = stack[-1]
+        frame_dir, frame_key, children, idx, child_results = frame
+
+        if children is None:
+            try:
+                children = list(frame_dir.iterdir())
+            except OSError:
+                # Cannot look inside: keep the directory visible (it renders
+                # an error note in the tree).
+                if frame_key is not None:
+                    memo[frame_key] = True
+                stack.pop()
+                if stack:
+                    stack[-1][4].append(True)
+                continue
+            frame[2] = children
+
+        if idx >= len(children):
+            visible = any(child_results)
+            if frame_key is not None:
+                memo[frame_key] = visible
+            stack.pop()
+            if stack:
+                stack[-1][4].append(visible)
+            continue
+
+        frame[3] = idx + 1
+        child = children[idx]
+
+        if child.is_symlink() and _is_outside_root(child, root_dir):
+            child_results.append(True)  # rendered with an "outside root" note
+            continue
+        if child.is_symlink() and not child.exists():
+            child_results.append(True)  # rendered with a "dangling symlink" note
+            continue
+        if ignore_predicate(child):
+            child_results.append(False)
+            continue
+        if exclude_resolved is not None and _is_same_path(child, exclude_resolved):
+            child_results.append(False)
+            continue
+        if child.parent == root_dir and child.name in _DEFAULT_OUTPUT_NAMES:
+            child_results.append(False)
+            continue
+        if child.is_symlink():
+            # Directory symlink (a file symlink is not a dir): note-worthy.
+            child_results.append(True)
+            continue
+        if child.is_dir():
+            child_key = _dir_identity(child)
+            if child_key is not None and child_key in memo and memo[child_key]:
+                child_results.append(True)
+                continue
+            stack.append([child, child_key, None, 0, []])
+            continue
+        child_results.append(True)  # a plain visible file
+
+    return bool(memo.get(key))
+
+
 def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool = True,
                      is_root: bool = False, exclude_path: Path | None = None,
                      skipped_files: dict[Path, str] | None = None,
@@ -135,6 +250,11 @@ def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool
     """
     if ignore_predicate is None:
         ignore_predicate = make_filter(root_dir)
+
+    # Shared cache for _dir_has_visible_content(): pruning decisions are
+    # constant within one run (same filters), so every directory is resolved
+    # exactly once — total O(n) even for deeply nested projects.
+    empty_dir_cache: dict = {}
 
     lines: list[str] = []
     # Keys come from _dir_identity(): either ("inode", st_dev, st_ino) or
@@ -203,9 +323,18 @@ def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool
                 # files (case-insensitive). Ignored items are filtered out.
                 entries: list[tuple[Path, str | None]] = []
                 for item in current.iterdir():
-                    if _is_outside_root(item, root_dir):
+                    # Short-circuit: a non-symlink entry of a real in-root
+                    # directory can never resolve outside the root, so skip
+                    # the expensive resolve() on the common path.
+                    if item.is_symlink() and _is_outside_root(item, root_dir):
                         # Kept visible in the tree, but never followed or packed.
                         entries.append((item, "symlink outside project root — not followed, not packed"))
+                        continue
+                    if item.is_symlink() and not item.exists():
+                        # Dangling link: nothing to pack, but it must stay
+                        # visible with an explanatory note (not silently
+                        # disappear from the tree).
+                        entries.append((item, "dangling symlink — target missing"))
                         continue
                     if ignore_predicate(item):
                         continue
@@ -223,6 +352,12 @@ def build_tree_lines(path: Path, root_dir: Path, prefix: str = "", is_last: bool
                         # is decided when the entry is popped, based on whether
                         # its target directory has already been traversed.
                         entries.append((item, _DIR_SYMLINK_MARKER))
+                        continue
+                    if item.is_dir() and not _dir_has_visible_content(
+                            item, ignore_predicate, root_dir, exclude_resolved,
+                            empty_dir_cache):
+                        # The whole subtree was filtered out (e.g. by --exclude
+                        # or .gitignore): prune the empty folder from the tree.
                         continue
                     entries.append((item, None))
                 entries.sort(key=lambda entry: (not entry[0].is_dir() if entry[1] is None else True,
@@ -256,7 +391,8 @@ def _collect_files(root_path: Path, output_path: Path, ignore_predicate) -> list
     :param root_path: Root directory (resolved).
     :param output_path: Output file to exclude from packing.
     :param ignore_predicate: Callable(Path) -> bool.
-    :return: Ordered list of file paths to pack.
+    :return: Tuple (ordered file paths to pack, skipped_links) where
+             skipped_links maps dropped symlink aliases to a reason.
     """
     files_to_pack: list[Path] = []
     # Keys come from _dir_identity(): either ("inode", st_dev, st_ino) or
@@ -312,39 +448,80 @@ def _collect_files(root_path: Path, output_path: Path, ignore_predicate) -> list
                 continue
             files_to_pack.append(node)
 
-    return files_to_pack
+    # File-symlink aliases pointing at an already-collected file are skipped,
+    # so identical content is never packed twice (the alias stays visible in
+    # the tree with an explanatory note). Real files are always preferred:
+    # their identities are collected first and the alias matches one of them.
+    real_identities: set = set()
+    for f in files_to_pack:
+        if not f.is_symlink():
+            key = _file_identity(f)
+            if key is not None:
+                real_identities.add(key)
+
+    unique_files: list[Path] = []
+    skipped_links: dict[Path, str] = {}
+    for f in files_to_pack:
+        if f.is_symlink():
+            key = _file_identity(f)
+            if key is not None and key in real_identities:
+                skipped_links[f] = "symlink alias — content already packed from the real file"
+                continue
+        unique_files.append(f)
+
+    return unique_files, skipped_links
 
 
 def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboard: bool = True,
                  *, max_file_size: int | None = None, output_format: str = "text",
-                 exclude_patterns=None, respect_gitignore: bool = True,
-                 include_tree: bool = True, enable_token_count: bool = True) -> dict:
+                 exclude_patterns=None, include_patterns=None, respect_gitignore: bool = True,
+                 include_tree: bool = True, enable_token_count: bool = True,
+                 strip_docs: bool = False, include_type_summary: bool = True,
+                 dry_run: bool = False, budget: int | None = None) -> dict:
     """
     Recursively scans the project, builds an ASCII tree, gathers all text file
     contents, saves the aggregated output to a single file and (optionally)
     copies it to the system clipboard.
 
     :param root_dir: Path to the root folder of the project.
-    :param output_file: Path to the target output text file.
+    :param output_file: Path to the target output text file (not written in
+                        dry-run mode).
     :param copy_to_clipboard: Whether to copy the generated context to the clipboard.
     :param max_file_size: Optional maximum file size in bytes; larger files
                           are skipped with a warning and marked in the tree.
-    :param output_format: 'text' (classic markers) or 'markdown' (fenced blocks).
+    :param output_format: 'text', 'markdown' or 'json'.
     :param exclude_patterns: Optional iterable of glob patterns (--exclude),
                              matched against the relative POSIX path and the file name.
+    :param include_patterns: Optional iterable of glob patterns (--include);
+                             when given, ONLY matching files are packed and
+                             directories that cannot contain them are pruned.
     :param respect_gitignore: Honor .pyaiignore/.gitignore files when the
                               optional 'pathspec' dependency is installed.
     :param include_tree: When False, the directory tree is omitted from the output.
     :param enable_token_count: When False, token estimation is skipped (faster
                                on large projects); token_method becomes 'disabled'.
+    :param strip_docs: Strip comments and docstrings from Python files
+                       (syntax-error files pass through untouched).
+    :param include_type_summary: When False, the per-extension summary is
+                                 omitted from the header / JSON document.
+    :param dry_run: Preview mode — compute everything and report, but write
+                    no file and touch no clipboard.
+    :param budget: Optional token budget; when the pack exceeds it a warning
+                   (with the heaviest files) is printed and 'budget_exceeded'
+                   is set in the returned stats. Requires token counting.
     :return: Dictionary with execution statistics (file counts, size, lines,
-             estimated tokens, clipboard status, ...).
+             estimated tokens, per-file and per-extension stats, clipboard
+             status, ...).
     """
     if output_format not in available_formats():
         raise ValueError(
             f"Unsupported output format '{output_format}'. "
             f"Available formats: {', '.join(available_formats())}."
         )
+    if budget is not None and budget <= 0:
+        raise ValueError(f"budget must be a positive number of tokens, got {budget!r}")
+    if budget is not None and not enable_token_count:
+        raise ValueError("budget check requires token counting (do not disable it)")
 
     root_path = Path(root_dir).resolve()
     output_path = Path(output_file).resolve()
@@ -353,16 +530,20 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         raise FileNotFoundError(f"The specified directory '{root_path}' does not exist or is not a directory.")
 
     matcher = load_ignore_matcher(root_path) if respect_gitignore else None
-    ignore_predicate = make_filter(root_path, patterns=exclude_patterns or (), matcher=matcher)
+    ignore_predicate = make_filter(root_path, patterns=exclude_patterns or (),
+                                   matcher=matcher, include_patterns=include_patterns or ())
 
     # 1. Collect all files allowed for packing (iterative, cycle-safe,
-    #    deterministic DFS order).
-    files_to_pack = _collect_files(root_path, output_path, ignore_predicate)
+    #    deterministic DFS order). Symlink aliases of already-collected files
+    #    are dropped here and reported through skipped_links.
+    files_to_pack, skipped_links = _collect_files(root_path, output_path, ignore_predicate)
 
-    # 2. Read file contents and format blocks
+    # 2. Read file contents, apply optional stripping, collect statistics.
     content_blocks: list[str] = []
-    skipped_files: dict[Path, str] = {}
+    file_records: list[dict] = []
+    skipped_files: dict[Path, str] = dict(skipped_links)
     total_source_lines = 0
+    stripped_suffixes = (".py", ".pyi")
 
     for file_path in files_to_pack:
         try:
@@ -395,11 +576,33 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         if encoding is not None and not encoding.startswith("utf-8"):
             print(f"Note: '{rel_path}' was read as {encoding} and transcoded to UTF-8.", file=sys.stderr)
 
-        total_source_lines += count_lines(content)
-        content_blocks.append(format_file_block(rel_path, content, output_format))
+        if strip_docs and file_path.suffix.lower() in stripped_suffixes:
+            content = strip_python_docs(content)
 
-    packed_count = len(content_blocks)
+        record_lines = count_lines(content)
+        record_tokens = count_tokens(content)[0] if enable_token_count else None
+        total_source_lines += record_lines
+        file_records.append({
+            "path": rel_path,
+            "lines": record_lines,
+            "tokens": record_tokens,
+            "content": content,
+        })
+        if output_format != "json":
+            content_blocks.append(format_file_block(rel_path, content, output_format))
+
+    packed_count = len(file_records)
     failed_count = len(skipped_files)
+
+    # Per-extension summary.
+    file_types: dict[str, dict] = {}
+    for record in file_records:
+        ext = Path(record["path"]).suffix.lower() or "(no ext)"
+        bucket = file_types.setdefault(ext, {"files": 0, "lines": 0, "tokens": 0})
+        bucket["files"] += 1
+        bucket["lines"] += record["lines"]
+        if record["tokens"] is not None:
+            bucket["tokens"] += record["tokens"]
 
     # 3. Generate the ASCII directory tree (AFTER reading files, so entries
     #    that failed to read can be visibly marked).
@@ -416,8 +619,10 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         tree_text = "\n".join(tree_lines)
 
     # 4. Assemble the complete output document and compute statistics.
-    #    Token statistics are computed over the final document, so they
-    #    describe exactly what would be pasted into the LLM.
+    #    Token statistics are computed over the FINAL document, so they
+    #    describe exactly what would be pasted into the LLM. Embedding the
+    #    statistics changes the header, which changes the statistics, so the
+    #    assembly is repeated until a fixed point is reached.
     stats = {
         "project_name": root_path.name,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -426,50 +631,98 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         "total_lines": 0,
         "estimated_tokens": 0,
         "token_method": "",
+        "file_types": file_types,
+        "include_type_summary": include_type_summary,
+        "budget": budget,
+        "budget_exceeded": False,
+        "dry_run": dry_run,
     }
 
-    full_output = assemble_output(stats, tree_text, content_blocks, output_format,
-                                  include_tree=include_tree)
+    def _assemble(current_stats: dict) -> str:
+        if output_format == "json":
+            skipped_rel = sorted(
+                (p.relative_to(root_path).as_posix(), reason)
+                for p, reason in skipped_files.items()
+            )
+            files_payload = [
+                {
+                    "path": record["path"],
+                    "lines": record["lines"],
+                    "tokens": record["tokens"],
+                    "content": record["content"],
+                }
+                for record in file_records
+            ]
+            return assemble_json_output(current_stats, tree_text, files_payload,
+                                        skipped_rel, include_tree=include_tree)
+        return assemble_output(current_stats, tree_text, content_blocks,
+                               output_format, include_tree=include_tree)
 
-    stats["total_lines"] = count_lines(full_output)
-    if enable_token_count:
-        estimated_tokens, token_method = count_tokens(full_output)
-    else:
-        estimated_tokens, token_method = 0, "disabled"
-    stats["estimated_tokens"] = estimated_tokens
-    stats["token_method"] = token_method
+    full_output = _assemble(stats)
+    for _ in range(10):
+        total_lines = count_lines(full_output)
+        if enable_token_count:
+            estimated_tokens, token_method = count_tokens(full_output)
+        else:
+            estimated_tokens, token_method = 0, "disabled"
+        if (total_lines, estimated_tokens, token_method) == (
+                stats["total_lines"], stats["estimated_tokens"], stats["token_method"]):
+            break  # the embedded statistics match the final document exactly
+        stats["total_lines"] = total_lines
+        stats["estimated_tokens"] = estimated_tokens
+        stats["token_method"] = token_method
+        full_output = _assemble(stats)
 
-    # Re-assemble once with the final statistics embedded in the header.
-    full_output = assemble_output(stats, tree_text, content_blocks, output_format,
-                                  include_tree=include_tree)
+    # Heaviest files (for --budget hints and dry-run previews).
+    heaviest_source = sorted(file_records, key=lambda r: -(r["tokens"] or 0))
+    stats["heaviest_files"] = [
+        {"path": r["path"], "lines": r["lines"], "tokens": r["tokens"]}
+        for r in heaviest_source[:5]
+    ]
 
-    # 5. Write to the output file
-    try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8", newline="") as f:
-            f.write(full_output)
-    except Exception as e:
-        raise OSError(f"Failed to write results to '{output_path}': {e}")
+    # Budget check.
+    if budget is not None and estimated_tokens > budget:
+        stats["budget_exceeded"] = True
+        heavy = ", ".join(
+            f"'{r['path']}' (~{r['tokens'] or 0:,})" for r in stats["heaviest_files"][:3]
+        )
+        print(
+            f"Warning: Token budget exceeded: ~{estimated_tokens:,} > {budget:,}. "
+            f"Heaviest files: {heavy}. Consider excluding some of them.",
+            file=sys.stderr,
+        )
 
-    # Report the REAL on-disk size in bytes (len() counts characters, which
-    # understates the size of non-ASCII content, e.g. Cyrillic in UTF-8).
-    try:
-        disk_size = output_path.stat().st_size
-    except OSError:
+    # 5. Write to the output file (unless previewing).
+    if dry_run:
         disk_size = len(full_output.encode("utf-8"))
-
-    # 6. Copy to the system clipboard if enabled. Any failure is reported to
-    #    the caller through the returned statistics (the CLI renders the
-    #    warning exactly once) instead of printing here.
-    clipboard_copied = False
-    clipboard_error = None
-
-    if copy_to_clipboard:
+    else:
         try:
-            pyperclip.copy(full_output)
-            clipboard_copied = True
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "w", encoding="utf-8", newline="") as f:
+                f.write(full_output)
         except Exception as e:
-            clipboard_error = str(e)
+            raise OSError(f"Failed to write results to '{output_path}': {e}")
+
+        # Report the REAL on-disk size in bytes (len() counts characters, which
+        # understates the size of non-ASCII content, e.g. Cyrillic in UTF-8).
+        try:
+            disk_size = output_path.stat().st_size
+        except OSError:
+            disk_size = len(full_output.encode("utf-8"))
+
+        # 6. Copy to the system clipboard if enabled. Any failure is reported
+        #    to the caller through the returned statistics (the CLI renders
+        #    the warning exactly once) instead of printing here.
+        clipboard_copied = False
+        clipboard_error = None
+        if copy_to_clipboard:
+            try:
+                pyperclip.copy(full_output)
+                clipboard_copied = True
+            except Exception as e:
+                clipboard_error = str(e)
+    if dry_run:
+        clipboard_copied, clipboard_error = False, None
 
     return {
         "root_dir": str(root_path),
@@ -485,6 +738,13 @@ def pack_project(root_dir: str | Path, output_file: str | Path, copy_to_clipboar
         "token_method": token_method,
         "output_format": output_format,
         "include_tree": include_tree,
+        "files": [{"path": r["path"], "lines": r["lines"], "tokens": r["tokens"]}
+                  for r in file_records],
+        "file_types": file_types,
+        "heaviest_files": stats["heaviest_files"],
+        "budget": budget,
+        "budget_exceeded": stats["budget_exceeded"],
+        "dry_run": dry_run,
     }
 
 

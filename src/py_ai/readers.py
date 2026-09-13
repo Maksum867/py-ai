@@ -31,16 +31,37 @@ _BOM_ENCODINGS = (
 )
 
 
-def looks_binary(raw: bytes, check_bytes: int = BINARY_CHECK_BYTES) -> bool:
+def looks_binary(raw: bytes, check_bytes: int | None = None) -> bool:
     """
     Binary heuristic: text files never contain NUL bytes.
-    Only the beginning of the file is inspected for speed.
+
+    By default the WHOLE buffer is inspected: the bytes are already in memory,
+    and a full scan also catches binary tails that the old leading-8-KiB
+    window missed (a NUL is valid UTF-8, so such files would otherwise be
+    packed as text with embedded NULs). Pass ``check_bytes`` to inspect only
+    a leading window (git-like behaviour).
+
+    Note: UTF-16/32 files WITHOUT a BOM contain NUL bytes and are therefore
+    reported as binary — they cannot be reliably told apart from real
+    binary data.
 
     :param raw: Raw file bytes.
-    :param check_bytes: How many leading bytes to inspect.
+    :param check_bytes: How many leading bytes to inspect (None = all).
     :return: True if the content looks binary.
     """
-    return b"\x00" in raw[:check_bytes]
+    window = raw if check_bytes is None else raw[:check_bytes]
+    return b"\x00" in window
+
+
+def _normalize_newlines(text: str) -> str:
+    """Converts Windows/mac line endings to plain LF.
+
+    Source files created on Windows carry ``\\r\\n``. Packing them as-is would
+    bloat the LLM context with CR noise (each CR is extra token material) and
+    make statistics platform-dependent. The pack itself is always written with
+    LF, so the content is normalized at read time.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def read_text_content(file_path: Path) -> tuple[str | None, str | None, str | None]:
@@ -52,6 +73,8 @@ def read_text_content(file_path: Path) -> tuple[str | None, str | None, str | No
     2. Files containing NUL bytes (in the first chunk) are treated as binary.
     3. Otherwise the encoding fallback chain is tried:
        UTF-8 -> UTF-8-SIG -> cp1251 -> latin-1 (the latter never fails).
+    4. Line endings are normalized to LF (CRLF/CR -> LF), so the pack is
+       byte-consistent across platforms and free of CR token noise.
 
     :param file_path: Path to the file to read.
     :return: Tuple (content, error_reason, encoding) where encoding is the
@@ -68,7 +91,7 @@ def read_text_content(file_path: Path) -> tuple[str | None, str | None, str | No
     for bom, encoding in _BOM_ENCODINGS:
         if raw.startswith(bom):
             try:
-                return raw.decode(encoding), None, encoding
+                return _normalize_newlines(raw.decode(encoding)), None, encoding
             except UnicodeDecodeError:
                 return None, "encoding error (invalid BOM-marked content)", None
 
@@ -77,7 +100,7 @@ def read_text_content(file_path: Path) -> tuple[str | None, str | None, str | No
 
     for encoding in ENCODING_FALLBACK_CHAIN:
         try:
-            return raw.decode(encoding), None, encoding
+            return _normalize_newlines(raw.decode(encoding)), None, encoding
         except UnicodeDecodeError:
             continue
 

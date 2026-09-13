@@ -98,8 +98,31 @@ def test_reports_encoding_used(tmp_path):
     assert enc_bin is None
 
 
+def test_newlines_normalized_to_lf(tmp_path):
+    """CRLF/CR source files are packed with LF endings: the pack stays
+    byte-consistent across platforms and free of CR token noise."""
+    crlf = _write(tmp_path, "crlf.py", b"a = 1\r\nb = 2\r\n")
+    content, err, _ = read_text_content(crlf)
+    assert err is None
+    assert content == "a = 1\nb = 2\n"
+
+    cr_only = _write(tmp_path, "cr.py", b"a = 1\rb = 2\r")
+    content, err, _ = read_text_content(cr_only)
+    assert err is None
+    assert content == "a = 1\nb = 2\n"
+
+    mixed = _write(tmp_path, "mixed.py", b"a\r\nb\nc\r")
+    content, err, _ = read_text_content(mixed)
+    assert err is None
+    assert content == "a\nb\nc\n"
+
+
 def test_looks_binary():
     assert looks_binary(b"\x00")
     assert not looks_binary(b"plain text")
-    # NUL beyond the inspected window is not detected (documented heuristic).
-    assert not looks_binary(b"x" * 9000 + b"\x00")
+    # The WHOLE buffer is scanned by default: a NUL far into the file also
+    # marks the file binary (it would otherwise be packed as "text" with
+    # embedded NULs, since NUL is valid UTF-8).
+    assert looks_binary(b"x" * 9000 + b"\x00")
+    # The leading-window behaviour stays available explicitly (git-like).
+    assert not looks_binary(b"x" * 9000 + b"\x00", check_bytes=8192)

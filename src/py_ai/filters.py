@@ -41,7 +41,10 @@ IGNORED_EXTENSIONS = {
     '.zip', '.tar', '.gz', '.bz2', '.xz', '.rar', '.7z', '.tgz', '.jar',
     '.war', '.ear',
     # Images and multimedia
-    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff', '.svg',
+    # NB: '.svg' is deliberately NOT here — SVG is a text/XML format that is
+    # often useful as LLM context; true binary content is still caught by the
+    # NUL-byte heuristic in readers.py.
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff',
     '.mp3', '.wav', '.ogg', '.flac', '.mp4', '.mkv', '.avi', '.mov', '.webm',
     # Fonts
     '.woff', '.woff2', '.ttf', '.eot', '.otf',
@@ -112,6 +115,19 @@ def should_ignore(path: Path, root_dir: Path) -> bool:
     :param root_dir: Root directory of the project.
     :return: True if the path should be ignored, False otherwise.
     """
+    # Fast path for the common case: an absolute, non-symlink entry of a real
+    # in-root directory cannot resolve outside the root, so the relative parts
+    # can be computed directly — this skips two expensive Path.resolve() calls
+    # per item (resolve() costs O(depth), which is quadratic on deeply nested
+    # projects). Anything unusual falls back to the full resolve-based logic.
+    if path.is_absolute() and not path.is_symlink():
+        try:
+            rel_parts_path = path.relative_to(root_dir.resolve())
+        except (ValueError, OSError):
+            rel_parts_path = None  # fall through to the slow path below
+        if rel_parts_path is not None:
+            return _should_ignore_rel(path, rel_parts_path)
+
     try:
         # Resolve to absolute paths to avoid issues with relative path operations
         abs_root = root_dir.resolve()
@@ -128,6 +144,12 @@ def should_ignore(path: Path, root_dir: Path) -> bool:
         # root. Ignore it so external files are never packed.
         return True
 
+    return _should_ignore_rel(path, rel_path)
+
+
+def _should_ignore_rel(path: Path, rel_path) -> bool:
+    """Applies the built-in name/extension rules to an already-computed
+    relative path (see should_ignore)."""
     is_file = path.is_file()
 
     # Check each part of the relative path.
@@ -201,9 +223,16 @@ def _rebase_ignore_line(line: str, rel_dir: str) -> str:
     """
     Rebases one ignore pattern so it is relative to the project root.
 
-    Git semantics: patterns inside 'sub/.gitignore' apply only inside 'sub/',
-    so they are prefixed with 'sub/'. The '!' negation prefix and anchored
-    '/' leading slashes are preserved. Comments/blank lines pass through.
+    Git semantics:
+    - patterns inside 'sub/.gitignore' apply only inside 'sub/';
+    - an UNANCHORED pattern (no '/' except an optional trailing one, e.g.
+      '*.tmp' or 'build/') matches at ANY depth below 'sub/', so it must be
+      rebased to 'sub/**/<pattern>' — a plain 'sub/<pattern>' would anchor
+      it to the direct children of 'sub/' only (deviation from git);
+    - an ANCHORED pattern (contains an inner '/', e.g. '/foo' or 'a/b')
+      is relative to the ignore file's own dir and is rebased to
+      'sub/<pattern>'.
+    The '!' negation prefix is preserved. Comments/blank lines pass through.
     """
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
@@ -216,11 +245,15 @@ def _rebase_ignore_line(line: str, rel_dir: str) -> str:
     if pattern.startswith("!"):
         negate = "!"
         pattern = pattern[1:].lstrip()
-    # An anchored pattern ('/foo') is relative to the ignore file's own dir.
+    # An inner slash (ignoring an optional trailing one) anchors the pattern
+    # to the ignore file's own directory; without it git matches any depth.
+    anchored = "/" in pattern[:-1]
     pattern = pattern.lstrip("/")
-    if pattern:
+    if not pattern:
+        return line
+    if anchored:
         return f"{negate}{rel_dir}/{pattern}"
-    return line
+    return f"{negate}{rel_dir}/**/{pattern}"
 
 
 def load_ignore_matcher(root_dir: Path):
@@ -343,25 +376,121 @@ def matches_ignore_files(path: Path, root_dir: Path, matcher) -> bool:
         matcher.match_file(rel_posix)
         or (path.is_dir() and matcher.match_file(rel_posix + "/"))
     )
+def _include_pattern_parts(pattern: str):
+    """
+    Normalizes one --include pattern into a (base_dir, name_glob) pair:
+
+      'src/', 'src/**', 'src'   ->  ('src', None)     everything under src/
+      '*.py', 'main.py'         ->  ('**', '*.py')    name glob at any depth
+      'src/**/*.py'             ->  ('src', '*.py')   glob under src/, any depth
+      'a/b*.txt'                ->  ('a', 'b*.txt')   glob under a/ (fnmatch, so
+                                                      '*' crosses '/' — see the
+                                                      --exclude note above)
+      '', '**'                  ->  ('**', None)      everything
+    """
+    p = pattern.strip().replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    if not p or p == "**":
+        return ("**", None)
+    trailing = p.endswith(("/", "/**"))
+    core = p[:-3] if p.endswith("/**") else p.rstrip("/")
+    if not core or core == "**":
+        return ("**", None)
+    if trailing:
+        return (core, None)
+    if "/" not in core:
+        return ("**", core)
+    deep = core.split("/**/", 1)
+    if len(deep) == 2:
+        return (deep[0], deep[1])
+    base, name = core.rsplit("/", 1)
+    return (base or "**", name)
 
 
-def make_filter(root_dir: Path, patterns=(), matcher=None):
+def matches_include_patterns(path: Path, root_dir: Path, patterns) -> bool:
+    """
+    FILES ONLY: True when the file matches at least one --include pattern.
+    With no patterns every file is allowed (include filtering is opt-in).
+
+    :param path: Path to check.
+    :param root_dir: Root directory of the project.
+    :param patterns: Iterable of include glob patterns.
+    :return: True if the file should be PACKED.
+    """
+    if not patterns:
+        return True
+    try:
+        rel = path.relative_to(root_dir).as_posix()
+    except ValueError:
+        rel = path.as_posix()
+    name = path.name
+    for pattern in patterns:
+        base, glob_ = _include_pattern_parts(pattern)
+        if base == "**":
+            if glob_ is None or fnmatch.fnmatch(name, glob_) or fnmatch.fnmatch(rel, glob_):
+                return True
+        elif glob_ is None:
+            if rel == base or rel.startswith(base + "/"):
+                return True
+        else:
+            if fnmatch.fnmatch(rel, base + "/" + glob_):
+                return True
+            if rel.startswith(base + "/") and fnmatch.fnmatch(name, glob_):
+                return True
+    return False
+
+
+def dir_kept_for_include(path: Path, root_dir: Path, patterns) -> bool:
+    """
+    DIRECTORIES: True when the directory may still contain included files
+    (it equals/contains an include base or is an ancestor of it, or the
+    pattern is a bare name glob that can match at any depth). Keeps traversal
+    and the directory tree consistent with --include.
+    """
+    if not patterns:
+        return True
+    try:
+        rel = path.relative_to(root_dir).as_posix()
+    except ValueError:
+        return True
+    for pattern in patterns:
+        base, _ = _include_pattern_parts(pattern)
+        if base == "**":
+            return True
+        if rel == base or rel.startswith(base + "/") or base.startswith(rel + "/"):
+            return True
+    return False
+
+
+def make_filter(root_dir: Path, patterns=(), matcher=None, include_patterns=()):
     """
     Builds a single ignore predicate combining all filtering layers:
-    built-in rules -> user glob patterns -> .gitignore/.pyaiignore matcher.
+    built-in rules -> user glob patterns (--exclude) -> .gitignore/.pyaiignore
+    matcher -> --include gate (when include patterns are given, only matching
+    files survive; directories that cannot contain them are treated as
+    ignored, so they are pruned from traversal and from the tree).
 
     :param root_dir: Root directory of the project.
     :param patterns: User-provided glob patterns (--exclude).
     :param matcher: Optional pathspec matcher (load_ignore_matcher).
+    :param include_patterns: Optional include glob patterns (--include).
     :return: Callable[[Path], bool]; True means 'ignore'.
     """
     root_dir = Path(root_dir)
+    inc = tuple(include_patterns or ())
 
     def _ignore(path: Path) -> bool:
-        return (
+        if (
             should_ignore(path, root_dir)
             or matches_user_patterns(path, root_dir, patterns)
             or matches_ignore_files(path, root_dir, matcher)
-        )
+        ):
+            return True
+        if inc:
+            if path.is_dir():
+                return not dir_kept_for_include(path, root_dir, inc)
+            return not matches_include_patterns(path, root_dir, inc)
+        return False
 
     return _ignore

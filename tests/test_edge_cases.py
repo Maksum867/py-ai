@@ -91,13 +91,16 @@ def test_pyaiignore_file(tmp_path):
 
 
 def test_nested_gitignore_is_honored(tmp_path):
-    """A .gitignore inside a subdirectory applies to that subtree."""
+    """A .gitignore inside a subdirectory applies to that subtree — at ANY
+    depth below it (git semantics for unanchored patterns)."""
     pytest.importorskip("pathspec")
 
     root = tmp_path / "nested"
-    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "deep" / "deeper").mkdir(parents=True)
     (root / "sub" / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
     (root / "sub" / "secret.tmp").write_text("x", encoding="utf-8")
+    (root / "sub" / "deep" / "deep_secret.tmp").write_text("x", encoding="utf-8")
+    (root / "sub" / "deep" / "deeper" / "deeper_secret.tmp").write_text("x", encoding="utf-8")
     (root / "sub" / "ok.txt").write_text("y", encoding="utf-8")
 
     out = tmp_path / "pack.txt"
@@ -106,6 +109,8 @@ def test_nested_gitignore_is_honored(tmp_path):
 
     assert "--- START OF FILE: sub/ok.txt ---" in content_section
     assert "--- START OF FILE: sub/secret.tmp ---" not in content_section
+    assert "--- START OF FILE: sub/deep/deep_secret.tmp ---" not in content_section
+    assert "--- START OF FILE: sub/deep/deeper/deeper_secret.tmp ---" not in content_section
 
 
 def test_pyaiignore_negation_overrides_gitignore(tmp_path):
@@ -144,3 +149,37 @@ def test_gitignore_negation_does_not_leak_into_pyaiignore_rules(tmp_path):
     content_section = out.read_text(encoding="utf-8").split("FILES CONTENT")[1]
 
     assert "--- START OF FILE: keep.log ---" not in content_section
+
+
+def test_excluded_dir_pruned_from_tree(tmp_path):
+    """A directory whose entire content was excluded must not appear in the
+    tree as an empty folder (tree stays consistent with packed content)."""
+    root = tmp_path / "prune"
+    (root / "docs" / "deep").mkdir(parents=True)
+    (root / "docs" / "a.md").write_text("x", encoding="utf-8")
+    (root / "docs" / "deep" / "b.md").write_text("x", encoding="utf-8")
+    (root / "app.py").write_text("y=1", encoding="utf-8")
+
+    out = tmp_path / "pack.txt"
+    pack_project(root, out, copy_to_clipboard=False, exclude_patterns=["docs/*"])
+    tree_section = out.read_text(encoding="utf-8").split("DIRECTORY TREE")[1].split("FILES CONTENT")[0]
+
+    assert "docs" not in tree_section
+    assert "app.py" in tree_section
+
+
+def test_gitignored_dir_pruned_from_tree(tmp_path):
+    """Same pruning for .gitignore-based exclusion (when pathspec available)."""
+    pytest.importorskip("pathspec")
+
+    root = tmp_path / "prune2"
+    (root / "generated").mkdir(parents=True)
+    (root / "generated" / "out.bin").write_bytes(b"\x00\x01")
+    (root / "app.py").write_text("y=1", encoding="utf-8")
+    (root / ".gitignore").write_text("generated/\n", encoding="utf-8")
+
+    out = tmp_path / "pack.txt"
+    pack_project(root, out, copy_to_clipboard=False)
+    tree_section = out.read_text(encoding="utf-8").split("DIRECTORY TREE")[1].split("FILES CONTENT")[0]
+
+    assert "generated" not in tree_section

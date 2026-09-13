@@ -57,3 +57,56 @@ def test_duplicate_dir_link_packed_once(tmp_path):
     content_section = text.split("FILES CONTENT")[1]
     assert content_section.count("--- START OF FILE: real/code.py") == 1
     assert "alias/code.py" not in content_section
+
+
+def test_file_symlink_alias_packed_once(tmp_path):
+    """A file symlink pointing INSIDE the project must not duplicate the
+    content: the real file is packed, the alias is skipped with a note."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "real.py").write_text("IMPL=42", encoding="utf-8")
+    (root / "alias.py").symlink_to(root / "real.py")
+
+    out = tmp_path / "pack.txt"
+    stats = pack_project(root, out, copy_to_clipboard=False)
+    text = out.read_text(encoding="utf-8")
+
+    assert text.count("IMPL=42") == 1
+    assert stats["packed_count"] == 1
+    assert stats["failed_count"] == 1
+    # The alias stays visible in the tree with an explanatory note.
+    assert "alias.py" in text.split("DIRECTORY TREE")[1].split("FILES CONTENT")[0]
+    assert "symlink alias" in text
+
+
+def test_real_files_with_same_content_are_both_packed(tmp_path):
+    """Deduplication must only affect symlinks, not distinct files that
+    happen to have equal content."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "a.py").write_text("SAME=1", encoding="utf-8")
+    (root / "b.py").write_text("SAME=1", encoding="utf-8")
+
+    out = tmp_path / "pack.txt"
+    stats = pack_project(root, out, copy_to_clipboard=False)
+    text = out.read_text(encoding="utf-8")
+
+    assert stats["packed_count"] == 2
+    assert text.count("SAME=1") == 2
+
+
+def test_dangling_symlink_shown_with_note(tmp_path):
+    """A symlink whose target does not exist must stay visible in the tree
+    with an explanatory note instead of disappearing silently."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "ok.py").write_text("x=1", encoding="utf-8")
+    (root / "dangling.py").symlink_to(root / "nonexistent.txt")
+
+    out = tmp_path / "pack.txt"
+    pack_project(root, out, copy_to_clipboard=False)
+    text = out.read_text(encoding="utf-8")
+
+    assert "dangling.py" in text
+    assert "dangling symlink" in text
+    assert "START OF FILE: dangling.py" not in text

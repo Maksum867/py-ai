@@ -17,18 +17,31 @@ Perfect for instantly feeding your codebase context into Large Language Models (
 ## ✨ Features
 
 - **LLM-ready statistics**: every pack ends with the total line count and an **estimated token count** (accurate `cl100k_base` counting when `tiktoken` is installed, ~4 chars/token heuristic otherwise), printed in the output header and in the CLI summary.
-- **Two output formats**: classic plain text (`--- START OF FILE: ... ---`) and **Markdown** (`--format markdown`) with language-aware fenced code blocks — paste straight into a chat and get syntax highlighting.
+- **Three output formats**: classic plain text (`--- START OF FILE: ... ---`), **Markdown** (`--format markdown`) with language-aware fenced code blocks, and **JSON** (`--format json`) with per-file metadata (`path`, `lines`, `tokens`, `content`) for scripts and API processing.
+- **`--include` filter**: pack ONLY files matching a pattern (`pyai --include 'src/**'`, `--include '*.py'`); directories that cannot contain matching files are pruned from the tree, and it composes with `--exclude`.
+- **LLM budget control (`--budget`)**: warn when the pack exceeds an LLM context limit (e.g. `--budget 128k`) and name the heaviest files to drop first; per-file line/token statistics are always available.
+- **`--dry-run` preview**: see exactly what would be packed (files sorted by token weight, totals, budget verdict) without writing anything.
+- **`--strip-docs`**: optionally strip comments and docstrings from Python files (AST-based, syntax-error files pass through untouched) to shrink the pack.
+- **File-type summary**: every pack header ends with a compact per-extension breakdown (e.g. `File types: .py x12 (3,456 lines), .md x2 (120 lines)`); disable with `--no-type-summary`.
 - **Smart Filtering**: automatically ignores VCS folders (`.git`, `.github`), virtual environments (`.venv`, `venv`), IDE settings (`.vscode`, `.idea`), build artifacts (`dist`, `build`, `*.egg-info`), caches (`__pycache__`, `.pytest_cache`), binary files (images, archives, databases, executables — plus a NUL-byte content heuristic) and hidden files (except explicitly allowed configs like `.gitignore`, `.env.example`, `.editorconfig`, `.dockerignore`).
 - **`.gitignore` / `.pyaiignore` support**: honored automatically when the optional `pathspec` dependency is installed (`pip install py-for-ai[gitignore]`).
 - **Custom exclusions**: additional glob patterns via `--exclude` (repeatable) and a per-file size cap via `--max-file-size`.
 - **Output control**: `--quiet`/`-q` for CI-friendly silent runs (errors still go to stderr), `--verbose`/`-v` for extra details, `--no-tree` to drop the directory tree section, and `--no-token-count` to skip token estimation on large projects.
-- **Symlink-Safe**: symlinks pointing **outside** the project root are never followed or packed; directory symlinks are never traversed, so cycles and aliased duplicates are impossible. Suspicious links stay visible in the directory tree with an explanatory note.
+- **Symlink-Safe**: symlinks pointing **outside** the project root are never followed or packed; directory symlinks are never traversed, so cycles and aliased duplicates are impossible; file-symlink aliases of already-packed files are packed only once. Suspicious links (outside-root, dangling, aliased) stay visible in the directory tree with an explanatory note.
 - **Deep-Project-Proof**: iterative (stack-based) directory traversal — no `RecursionError` on very deeply nested projects.
-- **Encoding-Aware**: reads UTF-8, UTF-8-BOM, UTF-16/32 (via BOM), legacy Cyrillic `cp1251` and other 8-bit encodings automatically; true binary files are skipped with a clear warning and marked in the tree.
+- **Encoding-Aware**: reads UTF-8, UTF-8-BOM, UTF-16/32 (via BOM), legacy Cyrillic `cp1251` and other 8-bit encodings automatically; line endings are normalized to LF (CRLF/CR → LF), so packs are byte-consistent across platforms; true binary files (NUL-byte heuristic over the whole file) are skipped with a clear warning and marked in the tree.
 - **ASCII Directory Tree**: a clean, sorted representation of your project layout, consistent with the packed content (skipped files are annotated).
 - **Clipboard Integration**: automatically copies the packed content; gracefully falls back with a warning in headless/SSH environments.
 
 ---
+
+## ⚠️ Known limitations (by design)
+
+- **UTF-16/32 without a BOM** contains NUL bytes and is skipped as binary — such files cannot be reliably told apart from real binary data.
+- The final **`latin-1` fallback never fails**, so an exotic legacy encoding may be transcoded with mojibake instead of being skipped.
+- Directories named `env`, `venv`, `build`, `dist` are ignored **at any depth** (common Python/`.gitignore` convention). A legitimate data folder with one of these names will not be packed.
+- In the classic **text format**, a source file that itself contains `--- START OF FILE: ... ---` lines can confuse naive parsers of the pack. The Markdown format is immune thanks to adaptive fences.
+- Token estimation with the `~4 chars/token` heuristic is approximate; install `py-for-ai[tokens]` for exact `cl100k_base` counting (both computed over the final document).
 
 ## 📂 Project Layout
 
@@ -37,7 +50,8 @@ py_ai_project/
 ├── pyproject.toml
 ├── README.md
 ├── CHANGELOG.md
-├── .github/workflows/tests.yml   # CI: pytest on 3 OS × 6 Python versions
+├── .github/workflows/tests.yml   # CI: pytest + ruff on 3 OS × 6 Python versions
+├── verify_all.py                 # cross-platform pre-release verification
 ├── tests/                        # pytest suite
 └── src/py_ai/
     ├── __init__.py               # version (read from installed metadata)
@@ -46,8 +60,10 @@ py_ai_project/
     ├── core.py                   # traversal orchestration + tree builder
     ├── filters.py                # ignore rules, --exclude, .gitignore support
     ├── readers.py                # encoding/binary-aware file reading
+    ├── stripping.py              # --strip-docs (AST comment/docstring removal)
     ├── tokens.py                 # line & token statistics
-    └── formatting.py             # text / markdown output assembly
+    ├── formatting.py             # text / markdown output assembly
+    └── py.typed                  # PEP 561 type marker
 ```
 
 ---
@@ -84,8 +100,8 @@ pytest
 Run everything — tests, lint, CLI smoke checks, git hygiene, build, wheel smoke — from the repo root:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File verify_all.ps1     # full check
-.\verify_all.ps1 -SkipBuild                                  # quick check (no build)
+python verify_all.py                 # full check (tests, lint, CLI smoke, build, wheel smoke)
+python verify_all.py --skip-build    # quick check (no build)
 ```
 
 The script exits `0` when every check passes and `1` when anything fails.
@@ -123,6 +139,20 @@ pyai --quiet --no-clipboard --no-tree -o context.txt
 # 9. Skip token estimation (faster on big repos) or show extra details:
 pyai --no-token-count
 pyai --verbose
+
+# 10. Pack ONLY the source tree (include filter), preview first:
+pyai --dry-run --include 'src/**'
+pyai --include 'src/**' --include '*.md' -o context.txt
+
+# 11. Check the pack against an LLM context budget:
+pyai --dry-run --budget 128k
+pyai --budget 128k -o context.txt
+
+# 12. Machine-readable output for scripts / per-file API calls:
+pyai --format json -o context.json
+
+# 13. Shrink the pack by stripping Python comments and docstrings:
+pyai --strip-docs -o lean_context.txt
 ```
 
 ---

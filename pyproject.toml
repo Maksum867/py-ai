@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "py-for-ai"
-version = "0.3.0"
+version = "0.4.0"
 description = "A command-line utility to pack Python codebases into a single text file for AI context, with clipboard support."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -12,8 +12,19 @@ license = {text = "MIT"}
 authors = [
     {name = "Maksym Khlystun"}
 ]
+keywords = ["llm", "ai", "chatgpt", "claude", "gemini", "context", "codebase", "cli", "prompt"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Topic :: Software Development",
@@ -31,10 +42,12 @@ gitignore = ["pathspec>=0.12"]
 # Everything above.
 all = ["tiktoken>=0.5", "pathspec>=0.12"]
 # Development & testing.
-dev = ["pytest>=7.0", "tiktoken>=0.5", "pathspec>=0.12"]
+dev = ["pytest>=7.0", "tiktoken>=0.5", "pathspec>=0.12", "ruff"]
 
 [project.urls]
 Homepage = "https://github.com/Maksum867/py-ai"
+Repository = "https://github.com/Maksum867/py-ai"
+Changelog = "https://github.com/Maksum867/py-ai/blob/main/CHANGELOG.md"
 
 [project.scripts]
 pyai = "py_ai.cli:main"

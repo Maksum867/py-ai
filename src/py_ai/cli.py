@@ -39,13 +39,34 @@ def parse_size(value: str) -> int:
     return result
 
 
+def parse_token_budget(value: str) -> int:
+    """
+    Parses a human-friendly token budget like '128k', '1.5m' or '200000'
+    into a number of tokens (k = 1,000, m = 1,000,000 — the way LLM context
+    windows are usually quoted). Raises ValueError on invalid input.
+    """
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmM])?\s*", value.strip())
+    if not match:
+        raise ValueError(f"invalid token budget: '{value}' (examples: 128k, 1m, 200000)")
+    number = float(match.group(1))
+    suffix = (match.group(2) or "").lower()
+    multiplier = {"": 1, "k": 1_000, "m": 1_000_000}[suffix]
+    result = int(number * multiplier)
+    if result <= 0:
+        raise ValueError(f"token budget must be greater than zero: '{value}'")
+    return result
+
+
 def _program_name() -> str:
     """Returns the program name to display, based on how the tool was invoked.
 
     Both console scripts ('pyai' and 'py-ai') point to the same entry point,
-    so the name must be derived from argv[0] instead of being hardcoded.
+    and `python -m py_ai` goes through __main__.py, so the name must be
+    derived from argv[0] instead of being hardcoded.
     """
     argv0 = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if argv0.endswith("__main__.py"):
+        return "python -m py_ai"
     if argv0.startswith("py-ai"):
         return "py-ai"
     if argv0.startswith("pyai"):
@@ -117,6 +138,43 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="Pack ONLY files matching this glob pattern (e.g. 'src/**', '*.py'). "
+             "Can be passed multiple times; combine with --exclude for exceptions."
+    )
+
+    parser.add_argument(
+        "--budget",
+        default=None,
+        metavar="TOKENS",
+        help="Warn when the pack exceeds this LLM token budget (e.g. 128k, 1m, "
+             "200000) and name the heaviest files to drop first."
+    )
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview only: show what would be packed (files by token weight, "
+             "totals, budget verdict) without writing a file or copying."
+    )
+
+    parser.add_argument(
+        "--strip-docs",
+        action="store_true",
+        help="Strip comments and docstrings from Python files to shrink the "
+             "pack (note: the LLM also loses those explanations)."
+    )
+
+    parser.add_argument(
+        "--no-type-summary",
+        action="store_true",
+        help="Omit the per-extension 'File types:' summary from the header."
+    )
+
+    parser.add_argument(
         "--no-gitignore",
         action="store_true",
         help="Do not honor .pyaiignore/.gitignore files even when the optional "
@@ -178,6 +236,17 @@ def main():
             print(f"❌ Error: {e}", file=sys.stderr)
             sys.exit(2)
 
+    budget = None
+    if args.budget is not None:
+        try:
+            budget = parse_token_budget(args.budget)
+        except ValueError as e:
+            print(f"❌ Error: {e}", file=sys.stderr)
+            sys.exit(2)
+
+    if args.dry_run and args.no_clipboard is False:
+        pass  # clipboard is skipped implicitly in dry-run mode
+
     if not args.quiet:
         try:
             resolved_root = root_path.resolve()
@@ -194,10 +263,38 @@ def main():
             max_file_size=max_file_size,
             output_format=args.output_format,
             exclude_patterns=args.exclude,
+            include_patterns=args.include,
             respect_gitignore=not args.no_gitignore,
             include_tree=not args.no_tree,
             enable_token_count=not args.no_token_count,
+            strip_docs=args.strip_docs,
+            include_type_summary=not args.no_type_summary,
+            dry_run=args.dry_run,
+            budget=budget,
         )
+
+        if not args.quiet and args.dry_run:
+            files = stats.get("files", [])
+            ordered = sorted(files, key=lambda r: -(r["tokens"] or 0))
+            print("\n🔍 DRY RUN — preview only (no file written, clipboard untouched)")
+            print(f"{'Lines':>7}  {'~Tokens':>8}  File")
+            for record in ordered[:20]:
+                tokens = f"~{record['tokens']:,}" if record["tokens"] is not None else "-"
+                print(f"{record['lines']:>7}  {tokens:>8}  {record['path']}")
+            if len(ordered) > 20:
+                print(f"  … and {len(ordered) - 20} more files")
+            totals = (f"Total: {stats['packed_count']} files, "
+                      f"{stats['total_lines']:,} lines")
+            if stats["token_method"] != "disabled":
+                totals += f", ~{stats['estimated_tokens']:,} tokens ({stats['token_method']})"
+            print(totals)
+            if budget is not None:
+                if stats["budget_exceeded"]:
+                    print(f"⚠️  Budget EXCEEDED: ~{stats['estimated_tokens']:,} > {budget:,} — "
+                          f"drop the heaviest files listed above.")
+                else:
+                    print(f"✅ Within budget: ~{stats['estimated_tokens']:,} <= {budget:,}")
+            sys.exit(0)
 
         if not args.quiet:
             print("\n✨ Project successfully packed!")
@@ -213,6 +310,12 @@ def main():
                 print("🪙 Estimated Tokens: disabled")
             else:
                 print(f"🪙 Estimated Tokens: ~{stats['estimated_tokens']} ({stats['token_method']})")
+
+            if budget is not None:
+                if stats["budget_exceeded"]:
+                    print(f"⚠️  Budget EXCEEDED: ~{stats['estimated_tokens']:,} > {budget:,}")
+                else:
+                    print(f"✅ Within budget: ~{stats['estimated_tokens']:,} <= {budget:,}")
 
             if stats['failed_count'] > 0:
                 print(f"⚠️  Skipped Files:    {stats['failed_count']} (see warning messages above; they are marked '[skipped: ...]' in the directory tree)")

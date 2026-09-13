@@ -288,8 +288,35 @@ def test_collect_files_survives_zero_inodes(tmp_path, monkeypatch):
         ))
 
     monkeypatch.setattr(os, "stat", zero_ino_stat)
-    files = core._collect_files(root, root / "out.txt", core.make_filter(root))
+    files, skipped_links = core._collect_files(root, root / "out.txt", core.make_filter(root))
+    assert skipped_links == {}  # no symlinks here: nothing dropped as an alias
 
     # as_posix() normalizes separators so the assertion works on Windows too.
     rels = sorted(f.relative_to(root).as_posix() for f in files)
     assert rels == ["c.py", "dir1/a.py", "dir2/b.py"]
+
+
+def test_token_stats_match_final_document(sample_project, tmp_path):
+    """The reported 'Total lines' and 'Estimated tokens' must describe the
+    FINAL file exactly: embedding the stats into the header changes the
+    header, so the assembly must be repeated to a fixed point."""
+    import re
+
+    from py_ai.tokens import count_tokens
+
+    out = tmp_path / "pack.txt"
+    stats = pack_project(sample_project, out, copy_to_clipboard=False)
+    # Exact bytes: read_text() would apply universal-newline translation,
+    # which on Windows (CRLF fixtures) changes the text and the token count.
+    final_text = out.read_bytes().decode("utf-8")
+
+    reported_lines = int(re.search(r"^Total lines: (\d+)$", final_text, re.MULTILINE).group(1))
+    assert reported_lines == stats["total_lines"] == final_text.count("\n")
+
+    if stats["token_method"] != "disabled":
+        actual_tokens = count_tokens(final_text)[0]
+        assert stats["estimated_tokens"] == actual_tokens
+        reported_tokens = int(
+            re.search(r"^Estimated tokens: ~(\d+)", final_text, re.MULTILINE).group(1)
+        )
+        assert reported_tokens == actual_tokens

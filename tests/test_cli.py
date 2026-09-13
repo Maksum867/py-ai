@@ -166,3 +166,17 @@ def test_parse_size():
         parse_size("0B")
     with pytest.raises(ValueError):
         parse_size("0.5B")
+
+
+def test_program_name_for_module_invocation(monkeypatch):
+    """`python -m py_ai` must display 'python -m py_ai' as the program name."""
+    from py_ai.cli import _program_name
+
+    monkeypatch.setattr(sys, "argv", ["/usr/lib/python3/x/py_ai/__main__.py"])
+    assert _program_name() == "python -m py_ai"
+
+    monkeypatch.setattr(sys, "argv", ["pyai"])
+    assert _program_name() == "pyai"
+
+    monkeypatch.setattr(sys, "argv", ["/usr/local/bin/py-ai"])
+    assert _program_name() == "py-ai"

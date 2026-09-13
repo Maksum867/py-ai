@@ -1,5 +1,115 @@
 # Changelog
 
+## [0.4.0] - 2026-09-13
+
+### Added
+- **`--include PATTERN`** (repeatable): pack ONLY files matching the pattern —
+  e.g. `pyai --include 'src/**'`, `--include '*.py'`. Directories that cannot
+  contain matching files are pruned from traversal and from the tree, so the
+  tree stays consistent with the packed content. Works together with
+  `--exclude` (exclude wins).
+- **Per-file statistics + `--budget TOKENS`**: every pack reports per-file
+  lines/tokens (see the returned stats and `--format json`), and `--budget`
+  (e.g. `--budget 128k`) warns when the pack exceeds an LLM context limit and
+  names the heaviest files to drop first. `128k` means 128,000 tokens.
+- **`--dry-run`**: preview mode — prints what would be packed (files sorted by
+  token weight, totals, budget verdict) without writing any file or touching
+  the clipboard.
+- **`--format json`**: machine-readable output — one JSON document with
+  metadata, statistics, per-file entries (`path`, `lines`, `tokens`,
+  `content`), skipped files and the directory tree; ideal for scripts and
+  per-file API processing.
+- **File-type summary in the header**: every text/markdown pack now ends its
+  header with a compact per-extension breakdown
+  (e.g. `File types: .py ×12 (3,456 lines), .md ×2 (120 lines)`).
+  Disable with `--no-type-summary`.
+- **`--strip-docs`**: strips comments and docstrings from Python files
+  (AST-based, syntax-error files pass through untouched) to shrink the pack —
+  at the cost of losing the explanations an LLM could lean on, so it is
+  opt-in.
+- **Cross-platform verification script `verify_all.py`**: one script with
+  identical checks (environment, editable install, compileall, ruff, pytest,
+  CLI smoke tests, git hygiene, build + twine check, wheel smoke test in a
+  clean temporary venv) that runs anywhere Python runs. Flags:
+  `--skip-build`, `--skip-install`.
+
+## [0.3.1] - 2026-09-13
+
+### Fixed
+- **CRLF line endings leaked into the pack on Windows** (`readers.py`): source
+  files created on Windows carry `\r\n`, which was packed as-is — extra CR
+  noise (and tokens) for the LLM and platform-dependent statistics. Content is
+  now normalized to LF at read time, so a pack is byte-identical regardless of
+  the OS it was produced on.
+- **Nested `.gitignore` files lost git's "any depth" semantics** (`filters.py`):
+  an unanchored pattern (e.g. `*.tmp`) in `sub/.gitignore` must ignore matching
+  files at ANY depth below `sub/`, but rebasing it to `sub/*.tmp` anchored it to
+  the direct children only — deeper files silently leaked into the pack. Nested
+  unanchored patterns are rebased to `sub/**/<pattern>` now; anchored patterns
+  (with an inner slash) keep `sub/<pattern>`. Verified against real git
+  semantics with `pathspec`.
+- **"Estimated tokens" was systematically underreported** (`core.py`): tokens
+  were counted on an intermediate document and the header was re-assembled once
+  afterwards, so the final file contained a stale (lower) number. The assembly
+  is now repeated to a fixed point — the reported lines/tokens describe the
+  final file exactly (verified for both tiktoken and the heuristic).
+- **Phantom CI**: README and the 0.3.0 changelog claimed
+  `.github/workflows/tests.yml` exists ("3 OS x 6 Python versions"), but the
+  file was never committed. The workflow is actually present now (pytest + ruff
+  on ubuntu/windows/macos x Python 3.8-3.13).
+- **Dangling symlinks vanished silently** (`core.py`): a symlink whose target
+  does not exist is now shown in the tree with a
+  `[dangling symlink — target missing]` note.
+- **File symlinks inside the project were packed twice** (`core.py`): an alias
+  like `alias.py -> real.py` duplicated the content in the pack. Aliases of
+  already-collected files are skipped now (identity via inode, resolved-path
+  fallback) and stay visible in the tree with a
+  `[symlink alias — content already packed ...]` note.
+- **Binary files with a NUL tail were packed as "text"** (`readers.py`): the
+  NUL-byte heuristic inspected only the first 8 KiB, but a NUL is valid UTF-8,
+  so such files produced text with embedded NULs. The whole buffer is scanned
+  now (`check_bytes` stays available for git-like windowed checks).
+- **`.svg` was filtered out as binary** (`filters.py`): SVG is a text/XML
+  format that is often useful as LLM context; it is packed now (highlighted as
+  `xml` in Markdown output) and true binary content is still caught by the
+  NUL heuristic.
+- **Empty directories stayed in the tree after exclusion** (`core.py`): e.g.
+  `--exclude 'docs/*'` removed all files but left the empty `docs/` folder.
+  Directories whose entire subtree was filtered out are pruned from the tree
+  now (memoized bottom-up visibility check — O(n) per run).
+- **`python -m py_ai --help` displayed the wrong program name** (`cli.py`):
+  module invocation now shows `python -m py_ai` instead of `pyai`.
+- **Performance on deeply nested projects** (`core.py`, `filters.py`): a
+  1100-level chain packs ~2.8x faster (resolve() calls skipped for the common
+  non-symlink case); the pruning visibility check is memoized and adds no
+  asymptotic cost.
+
+### Added
+- **`py.typed`** marker (`src/py_ai/`): the package is fully type-annotated and
+  now ships PEP 561 type information to type checkers.
+- **Full PyPI classifiers** (`pyproject.toml`): Python 3.8-3.13 version
+  classifiers, Development Status, Environment, Intended Audience + keywords,
+  so the PyPI "Python Support" badge reflects reality.
+- **Language detection by file name** (`formatting.py`): `Dockerfile`,
+  `Makefile`, `CMakeLists.txt`, `.gitignore`, `.editorconfig` etc. now get
+  proper Markdown fence languages.
+- **Python 3.14** added to classifiers and the CI matrix (3 OS × 7 versions).
+- **21 new regression tests**: nested-gitignore depth/anchoring/negation,
+  symlink alias dedup, dangling-link note, token-stat fixed point, tree
+  pruning, NUL-tail detection, newline normalization, language detection,
+  program name.
+
+### Notes (documented behaviour, unchanged by design)
+- UTF-16/32 files WITHOUT a BOM contain NUL bytes and are skipped as binary.
+- The final `latin-1` fallback never fails, so exotic legacy encodings may be
+  transcoded with mojibake instead of being skipped.
+- Directories named `env`/`venv`/`build`/`dist` are ignored at ANY depth
+  (common Python/gitignore convention).
+- In the classic text format, a source file containing its own
+  `--- START OF FILE: ... ---` lines can confuse naive parsers of the pack;
+  the Markdown format is immune thanks to adaptive fences.
+
+
 ## [0.3.0] - 2026-08-01
 
 ### Added
@@ -25,8 +135,8 @@
 - **Stale type annotations** for the visited-directories set (`core.py`):
   they describe the actual `_dir_identity()` keys.
 - Docs: removed the brittle hardcoded test count from the README.
-- Added `verify_all.ps1`: one-file pre-release verification (tests, lint,
-  CLI smoke, git hygiene, build, wheel smoke).
+- Added a one-file pre-release verification script (tests, lint, CLI smoke,
+  git hygiene, build, wheel smoke).
 - **Ruff lint fixes** (`src/`, `tests/`): sorted imports/`__all__`, removed an
   unused import, `IOError` → `OSError` (alias in Python 3), dropped a
   redundant UTF-8 argument; added a `[tool.ruff]` config documenting the
