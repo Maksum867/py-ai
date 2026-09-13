@@ -104,8 +104,12 @@
   symlink alias dedup, dangling-link note, token-stat fixed point, tree
   pruning, NUL-tail detection, newline normalization, language detection,
   program name. The deep-nesting test now cleans up after itself
-  iteratively, so pytest's own recursive tmp-dir garbage collection cannot
-  crash on Python <= 3.11.
+  iteratively (pytest's own recursive tmp-dir garbage collection cannot
+  crash on Python <= 3.11) and caps its depth on macOS, whose 1024-byte
+  PATH_MAX makes an 1100-level tree physically impossible.
+- **CI failures are now debuggable**: when pytest fails, the last 120 lines
+  of its output are written to the workflow run Summary, which is viewable
+  without repository permissions.
 
 ### Notes (documented behaviour, unchanged by design)
 - UTF-16/32 files WITHOUT a BOM contain NUL bytes and are skipped as binary.

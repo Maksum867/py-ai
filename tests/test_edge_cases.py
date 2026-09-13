@@ -1,6 +1,7 @@
 """Edge-case tests: deep nesting, unreadable dirs, ignore-file support."""
 
 import os
+import sys
 
 import pytest
 
@@ -26,10 +27,19 @@ def _iterative_rmtree(path):
 
 
 def test_deeply_nested_project(tmp_path):
-    """~1100 levels of nesting must not hit the recursion limit."""
+    """Deep nesting must not hit the recursion limit (iterative traversal).
+
+    The depth is platform-capped: macOS enforces a 1024-byte PATH_MAX, so an
+    1100-level tree physically cannot exist there (the runner's tmp base path
+    alone consumes ~100 bytes). Linux/Windows runners handle 1100 levels.
+    """
+    budget = 950 if sys.platform == "darwin" else 4000
+    base_len = len(str(tmp_path / "deep")) + 8  # "/deep" + slack
+    depth = max(40, min(1100, (budget - base_len) // 2))
+
     current = tmp_path / "deep"
     current.mkdir()
-    for _ in range(1100):
+    for _ in range(depth):
         current = current / "d"
         current.mkdir()
     (current / "leaf.py").write_text("x=1", encoding="utf-8")
